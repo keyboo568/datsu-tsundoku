@@ -22,6 +22,7 @@ export const fmtTime = (sec) => {
 
 /** v1.02 までの形式（# 書名 メモ / ## 日時 ｜ 位置 / <!-- id:… -->）から、見出しと記録用の行を外して本文だけにする */
 function fromLegacy(md) {
+  md = md.replace(/\r\n?/g, '\n'); // 入力欄は LF になるので、Windows の改行（CRLF）もそろえておく
   if (!/<!-- id:/.test(md)) return md;
   return md
     .split(/\r?\n/)

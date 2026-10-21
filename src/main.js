@@ -15,7 +15,7 @@ import {
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.03';
+const VERSION = 'v1.04';
 const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
@@ -41,7 +41,6 @@ const ui = {
   category: '', // 本棚の絞り込み（'' = すべて、NO_CATEGORY = 未分類）
   pickerPath: '',
   sheetBookKey: null,
-  onSheetClose: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -88,9 +87,6 @@ function openSheet(html, onMount) {
   onMount?.(el.querySelector('.sheet-body'));
 }
 function closeSheet() {
-  const onClose = ui.onSheetClose;
-  ui.onSheetClose = null;
-  onClose?.();
   $('#sheet').classList.remove('open');
   $('#sheet').innerHTML = '';
   ui.sheetBookKey = null;
@@ -342,7 +338,7 @@ async function startDownload(book) {
 
 async function openReader(book, { view, page } = {}) {
   closeSheet();
-  if (ui.reader?.book.key !== book.key) closeReader();
+  if (ui.reader && ui.reader.book.key !== book.key && !closeReader()) return;
   const s = st(book);
   if ((s.status || 'unread') === 'unread') updateBook(book.key, { status: 'reading' });
   updateBook(book.key, { lastOpened: Date.now() });
@@ -362,31 +358,72 @@ async function openReader(book, { view, page } = {}) {
 }
 
 function readerHtml(book) {
-  const views = [book.mindmap && ['mindmap', 'マインドマップ'], book.pdf && ['pdf', 'PDF']].filter(Boolean);
+  const views = [book.mindmap && ['mindmap', 'マインドマップ'], ['memo', 'メモ'], book.pdf && ['pdf', 'PDF']].filter(Boolean);
   return `
     <header class="reader-top">
       <button class="icon" data-act="close-reader" aria-label="戻る">←</button>
       <h1>${esc(book.title)}</h1>
       <button class="icon fav-mini ${st(book).fav ? 'on' : ''}" data-act="fav" data-key="${esc(book.key)}" aria-label="お気に入り">${st(book).fav ? '★' : '☆'}</button>
-      <button class="icon" data-act="memo-sheet" aria-label="メモ">✎</button>
     </header>
-    ${views.length > 1 ? `<div class="seg view-seg">${views.map(([k, v]) => `<button data-act="view" data-view="${k}">${v}</button>`).join('')}</div>` : ''}
+    <div class="seg view-seg">${views.map(([k, v]) => `<button data-act="view" data-view="${k}">${v}</button>`).join('')}</div>
     <div class="reader-body">
       <div class="pane" data-pane="mindmap"></div>
+      <div class="pane" data-pane="memo">
+        <div class="memo-pane">
+          ${book.points.map((p) => `<div class="memo-point">${esc(pointText(p))}</div>`).join('')}
+          <textarea class="memo-input memo-edit" placeholder="この本について覚えておきたいこと" disabled>読み込み中…</textarea>
+          <div class="memo-bar"><span class="memo-state">保存済み</span><button class="btn primary memo-save" data-act="memo-save" disabled>保存</button></div>
+        </div>
+      </div>
       <div class="pane" data-pane="pdf"><div class="pdf-host"></div>
         <div class="pdf-tools"><button data-act="zoom" data-d="-0.5">－</button><button class="page-ind" data-act="goto-page">- / -</button><button data-act="zoom" data-d="0.5">＋</button></div>
       </div>
-      ${views.length ? '' : '<div class="empty">PDF もマインドマップもありません</div>'}
     </div>
     <div class="player"></div>`;
+}
+
+// ---------- メモのタブ（1 冊に 1 枚。保存はボタンで。未保存はタブと保存欄でひと目でわかるように） ----------
+
+const memoDirty = (r = ui.reader) => !!r?.memoLoaded && r.el.querySelector('.memo-edit').value !== r.memoSaved;
+
+function updateMemoState() {
+  const r = ui.reader;
+  if (!r?.memoLoaded) return;
+  const dirty = memoDirty(r);
+  r.el.querySelector('[data-view="memo"]').classList.toggle('dirty', dirty);
+  const state = r.el.querySelector('.memo-state');
+  state.textContent = dirty ? '● 保存していない変更があります' : '✓ 保存済み';
+  state.classList.toggle('dirty', dirty);
+  r.el.querySelector('.memo-save').disabled = !dirty;
+}
+
+async function loadMemoPane(r) {
+  const ta = r.el.querySelector('.memo-edit');
+  r.memoSaved = (await getMemo(r.book.key)).replace(/\r\n?/g, '\n'); // 古いキャッシュの CRLF もそろえる
+  ta.value = r.memoSaved;
+  ta.disabled = false;
+  r.memoLoaded = true;
+  ta.addEventListener('input', updateMemoState);
+  updateMemoState();
+}
+
+async function saveMemoPane() {
+  const r = ui.reader;
+  if (!memoDirty(r)) return;
+  const text = r.el.querySelector('.memo-edit').value;
+  await saveMemo(r.book, text);
+  r.memoSaved = text;
+  updateMemoState();
+  toast(navigator.onLine ? 'メモを保存しました' : 'メモを端末に保存しました（つながったら Dropbox へ送ります）');
 }
 
 async function switchView(v) {
   const r = ui.reader;
   const { book, el } = r;
-  if (v === 'mindmap' && !book.mindmap) v = 'pdf';
-  if (v === 'pdf' && !book.pdf) v = 'mindmap';
+  if (v === 'mindmap' && !book.mindmap) v = book.pdf ? 'pdf' : 'memo';
+  if (v === 'pdf' && !book.pdf) v = book.mindmap ? 'mindmap' : 'memo';
   r.view = v;
+  if (v === 'memo' && !r.memoLoaded) loadMemoPane(r);
   if (st(book).view !== v) updateBook(book.key, { view: v });
   el.querySelectorAll('[data-act="view"]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
   el.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === v));
@@ -432,14 +469,20 @@ async function switchView(v) {
   }
 }
 
+/** 読む画面を閉じる。保存していないメモがあって、閉じるのをやめたら false */
 function closeReader() {
   const r = ui.reader;
-  if (!r) return;
+  if (!r) return true;
+  if (memoDirty(r) && !confirm('メモを保存していません。保存せずに閉じますか？')) {
+    switchView('memo');
+    return false;
+  }
   r.pdf?.destroy();
   r.el.classList.remove('open');
   r.el.innerHTML = '';
   ui.reader = null;
   refresh();
+  return true;
 }
 
 // ---------- プレーヤー（読む画面の下・本棚のミニプレーヤー） ----------
@@ -538,31 +581,6 @@ onPlayer((ev) => {
   renderMini();
 });
 
-// ---------- メモ（1 冊に 1 枚） ----------
-
-async function openMemoSheet(book) {
-  const original = await getMemo(book.key);
-  const inReader = ui.reader?.book.key === book.key;
-  openSheet(
-    `<h3>メモ</h3>
-    <p class="muted small">${esc(book.title)}</p>
-    ${book.points.map((p) => `<div class="memo-point">${esc(pointText(p))}</div>`).join('')}
-    <textarea class="memo-input memo-page" rows="12" placeholder="この本について覚えておきたいこと">${esc(original)}</textarea>
-    <div class="row">${inReader ? '' : `<button class="btn ghost" data-act="open-book" data-key="${esc(book.key)}">本を開く</button>`}<button class="btn primary" data-act="close-sheet">保存して閉じる</button></div>`,
-    (body) => {
-      const ta = body.querySelector('textarea');
-      // 閉じ方（ボタン・外側タップ・本を開く）に関係なく、書き換えていれば保存する
-      ui.onSheetClose = () => {
-        if (ta.value === original) return;
-        saveMemo(book, ta.value).then(() => {
-          toast('メモを保存しました');
-          if (ui.screen === 'library' && ui.tab === 'memo') renderMemoList();
-        });
-      };
-    },
-  );
-}
-
 // ---------- 設定・フォルダ登録 ----------
 
 async function renderSettings() {
@@ -636,6 +654,7 @@ function refresh() {
   if (ui.screen === 'library') {
     renderTabs();
     if (ui.tab !== 'memo') renderLibrary();
+    else renderMemoList();
   }
   if (ui.sheetBookKey) {
     const b = findBook(ui.sheetBookKey);
@@ -714,10 +733,10 @@ const actions = {
   },
   'mini-play': () => toggle(),
   'mini-skip': (el) => skip(+el.dataset.d),
-  'memo-sheet': () => openMemoSheet(ui.reader.book),
+  'memo-save': () => saveMemoPane(),
   'memo-open': (el) => {
     const b = findBook(el.dataset.key);
-    if (b) openMemoSheet(b);
+    if (b) openReader(b, { view: 'memo' });
   },
   'cat-filter': (el) => {
     ui.category = el.dataset.cat;
@@ -807,6 +826,7 @@ document.addEventListener('change', (ev) => {
 addEventListener('online', () => refresh());
 addEventListener('offline', () => refresh());
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flushState());
+addEventListener('beforeunload', (e) => memoDirty() && e.preventDefault());
 
 // ---------- 読み込み・起動 ----------
 

@@ -222,7 +222,18 @@ body.mock .mock-tag { display: inline-block; }
   display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
 }
 .memo-point { margin-top: 6px; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--bg); font-size: 13px; font-weight: 600; }
-.memo-page { margin-top: 10px; min-height: 40vh; line-height: 1.7; }
+/* 読む画面のメモのタブ */
+.memo-pane { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; overflow-y: auto; }
+.memo-pane .memo-point { margin-top: 0; }
+.memo-edit { flex: 1; min-height: 160px; resize: none; font-size: 15px; line-height: 1.75; }
+.memo-bar { display: flex; align-items: center; gap: 10px; }
+.memo-state { flex: 1; font-size: 13px; color: var(--reading); }
+.memo-state.dirty { color: var(--accent); font-weight: 700; }
+.memo-bar .btn { width: auto; margin: 0; padding: 9px 22px; }
+.memo-bar .btn:disabled { background: var(--surface); color: var(--muted); border-color: var(--line); opacity: 1; }
+/* 保存していない変更があるとき、タブに印を付ける */
+.seg button.dirty::after { content: '●'; color: var(--accent); font-size: 10px; margin-left: 4px; vertical-align: 2px; }
+.seg button.on.dirty::after { color: #ffb38f; }
 
 /* ---------- 設定・フォルダ選択 ---------- */
 .settings, .picker, .welcome { padding: 0 16px 24px; }
