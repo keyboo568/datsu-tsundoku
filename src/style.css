@@ -12,11 +12,13 @@
   --done: #5a6b80;
   --danger: #b3261e;
   --shadow: 0 1px 2px rgba(60, 40, 20, 0.18), 0 6px 14px rgba(60, 40, 20, 0.14);
-  --wood-back-1: #8d5f3b;
-  --wood-back-2: #6c4527;
-  --wood-frame: #5a3920;
-  --wood-board-1: #c99060;
-  --wood-board-2: #93603a;
+  --wood-back-1: #d8c6a9;
+  --wood-back-2: #c9b493;
+  --wood-frame: #bea47f;
+  --wood-board-1: #dccbb0;
+  --wood-board-2: #c7b18e;
+  --wood-grain: 96, 72, 40;
+  --wood-label: #5b4630;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -33,11 +35,13 @@
     --done: #8fa1b8;
     --danger: #ff8a80;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 6px 14px rgba(0, 0, 0, 0.4);
-    --wood-back-1: #4d321f;
-    --wood-back-2: #3a2415;
-    --wood-frame: #2b1a0e;
-    --wood-board-1: #8f5f38;
-    --wood-board-2: #6a4426;
+    --wood-back-1: #b3a084;
+    --wood-back-2: #a18d70;
+    --wood-frame: #8d7859;
+    --wood-board-1: #bba98c;
+    --wood-board-2: #a49072;
+    --wood-grain: 60, 44, 22;
+    --wood-label: #3e2f1f;
     color-scheme: dark;
   }
 }
@@ -90,15 +94,16 @@ body.mock .mock-tag { display: inline-block; }
 /* ---------- 本棚（木目のディスプレイラック。表紙を正面に向けて立てかける） ---------- */
 .rack {
   margin: 4px 10px 24px; padding: 10px 10px 4px; border-radius: 6px;
+  /* 明るいオーク材。木目は横に流す */
   background:
-    repeating-linear-gradient(91deg, rgba(255, 232, 196, 0.05) 0 1px, transparent 1px 7px),
-    repeating-linear-gradient(88deg, rgba(40, 18, 4, 0.12) 0 2px, transparent 2px 23px),
-    repeating-linear-gradient(90deg, transparent 0 calc(25% - 1px), rgba(30, 14, 4, 0.35) calc(25% - 1px) 25%),
-    radial-gradient(ellipse at 30% 15%, rgba(255, 220, 170, 0.14), transparent 60%),
+    repeating-linear-gradient(180deg, rgba(var(--wood-grain), 0.05) 0 1px, transparent 1px 5px),
+    repeating-linear-gradient(179deg, rgba(var(--wood-grain), 0.07) 0 2px, transparent 2px 19px),
+    repeating-linear-gradient(181deg, rgba(255, 255, 255, 0.10) 0 1px, transparent 1px 11px),
+    radial-gradient(ellipse at 75% 10%, rgba(255, 255, 255, 0.28), transparent 60%),
     linear-gradient(180deg, var(--wood-back-1), var(--wood-back-2));
   box-shadow:
-    inset 0 0 0 9px var(--wood-frame), inset 0 0 0 10px rgba(0, 0, 0, 0.3),
-    inset 0 16px 26px rgba(0, 0, 0, 0.35), var(--shadow);
+    inset 0 0 0 9px var(--wood-frame), inset 0 0 0 10px rgba(var(--wood-grain), 0.25),
+    inset 0 14px 22px rgba(var(--wood-grain), 0.22), var(--shadow);
 }
 .rack-row { position: relative; padding-top: 16px; }
 .rack-books {
@@ -106,27 +111,26 @@ body.mock .mock-tag { display: inline-block; }
   overflow-x: auto; padding: 0 14px; scroll-snap-type: x proximity; scrollbar-width: none;
 }
 .rack-books::-webkit-scrollbar { display: none; }
-.rack-empty { margin: auto; align-self: center; color: rgba(255, 238, 214, 0.55); font-size: 13px; }
+.rack-empty { margin: auto; align-self: center; color: rgba(var(--wood-grain), 0.55); font-size: 13px; }
 .rack-board {
   position: relative; z-index: 1; height: 26px; margin-top: -7px;
   display: flex; align-items: center; justify-content: center;
   background:
-    repeating-linear-gradient(180deg, rgba(255, 240, 210, 0.08) 0 1px, transparent 1px 4px),
-    repeating-linear-gradient(177deg, rgba(60, 28, 8, 0.14) 0 2px, transparent 2px 9px),
+    repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0 1px, transparent 1px 4px),
+    repeating-linear-gradient(178deg, rgba(var(--wood-grain), 0.08) 0 1px, transparent 1px 9px),
     linear-gradient(180deg, var(--wood-board-1), var(--wood-board-2));
-  box-shadow: inset 0 2px 0 rgba(255, 228, 186, 0.35), inset 0 -3px 0 rgba(0, 0, 0, 0.25), 0 9px 10px -5px rgba(0, 0, 0, 0.5);
+  box-shadow: inset 0 2px 0 rgba(255, 255, 255, 0.45), inset 0 -2px 0 rgba(var(--wood-grain), 0.18), 0 8px 10px -6px rgba(var(--wood-grain), 0.45);
 }
+/* 段の名前は棚板に焼き印したような控えめな文字で */
 .plate {
-  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #3b2a12; padding: 2px 12px; border-radius: 3px;
-  background: linear-gradient(180deg, #f3dc9a, #c9a24f 55%, #a8802f);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 1px 2px rgba(0, 0, 0, 0.5);
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.12em; color: var(--wood-label);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 .plate small { margin-left: 6px; opacity: 0.7; }
 .card { position: relative; flex: none; width: 92px; border: 0; padding: 0; background: none; scroll-snap-align: start; }
 .rack .cover {
   border-radius: 2px 4px 4px 2px; transform: perspective(500px) rotateX(4deg); transform-origin: bottom;
-  box-shadow: 4px 5px 7px rgba(0, 0, 0, 0.5), 0 0 1px rgba(0, 0, 0, 0.6);
+  box-shadow: 4px 5px 8px rgba(var(--wood-grain), 0.38), 0 0 1px rgba(0, 0, 0, 0.4);
 }
 .cover {
   aspect-ratio: 2 / 3; border-radius: 3px 6px 6px 3px; overflow: hidden;
