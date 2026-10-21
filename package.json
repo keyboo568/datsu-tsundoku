@@ -1,0 +1,24 @@
+{
+  "name": "datsu-tsundoku",
+  "private": true,
+  "version": "1.0.0",
+  "description": "脱ツンドク — Dropbox の PDF と音声で積ん読を崩す本棚 PWA",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "vite --mode mock",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "idb-keyval": "^6.3.0",
+    "markmap-lib": "^0.18.12",
+    "markmap-view": "^0.18.12",
+    "pdfjs-dist": "^6.4.299"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4",
+    "vite-plugin-pwa": "^2.0.0"
+  }
+}
