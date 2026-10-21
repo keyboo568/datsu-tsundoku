@@ -4,17 +4,19 @@ import { isMock, hasAppKey, isLoggedIn, startLogin, handleRedirect, logout, dbx,
 import {
   kvGet, kvSet, loadState, bookState, updateBook, seedBook, allStates, flushState,
   getThumb, setThumb, downloads, downloadBook, localFile, removeDownload, touchDownload, purgeOldDownloads, daysLeft,
+  remainingBytes, DownloadStopped,
 } from './store.js';
 import { cachedLibrary, scanLibrary, listSubfolders, trackLabel } from './library.js';
 import { setSyncContext, syncNow } from './sync.js';
-import { bookMemos, allMemos, addMemo, editMemo, deleteMemo, placeLabel, fmtTime, fmtDate } from './memo.js';
+import { getMemo, saveMemo, allMemos, fmtTime } from './memo.js';
 import {
   initPlayer, playerState, onPlayer, loadAudio, toggle, skip, seek, setSpeed, selectTrack, tracksOf, savedPosition, SPEEDS, setArtwork, probeDurations,
 } from './player.js';
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.00';
+const VERSION = 'v1.03';
+const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
   ['shelf', '本棚'],
@@ -36,9 +38,10 @@ const ui = {
   downloads: {},
   progress: {}, // ダウンロード中：key → { done, total }
   reader: null, // { book, view, el, pdf, pdfLoading }
-  memoFilter: '',
+  category: '', // 本棚の絞り込み（'' = すべて、NO_CATEGORY = 未分類）
   pickerPath: '',
   sheetBookKey: null,
+  onSheetClose: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -46,6 +49,18 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const mb = (bytes) => (bytes / 1024 / 1024 >= 1000 ? (bytes / 1024 ** 3).toFixed(1) + 'GB' : Math.round(bytes / 1024 / 1024) + 'MB');
 const findBook = (key) => ui.books.find((b) => b.key === key);
 const st = (book) => bookState(book.key) || {};
+const isDownloaded = (key) => ui.downloads[key] && ui.downloads[key].complete !== false;
+const pointText = (p) => p.text || p.name.replace(/\.txt$/i, '').replace(/^🟥/, '');
+
+/** 使われているカテゴリの一覧（カテゴリは本に付けた名前から集める。どの本にも付いていなければ消える） */
+const categories = () =>
+  [...new Set(ui.books.map((b) => st(b).category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
+
+/** モバイル通信につながっているか。判定できない端末（PC など）は false */
+function onCellular() {
+  const type = navigator.connection?.type;
+  return !!type && type !== 'wifi' && type !== 'ethernet';
+}
 
 // ---------- 小物：トースト・シート ----------
 
@@ -73,6 +88,9 @@ function openSheet(html, onMount) {
   onMount?.(el.querySelector('.sheet-body'));
 }
 function closeSheet() {
+  const onClose = ui.onSheetClose;
+  ui.onSheetClose = null;
+  onClose?.();
   $('#sheet').classList.remove('open');
   $('#sheet').innerHTML = '';
   ui.sheetBookKey = null;
@@ -160,6 +178,8 @@ const recency = (book) => Math.max(st(book).lastOpened || 0, st(book).lastPlayed
 
 function booksForTab(tab) {
   let list = ui.books;
+  if (ui.category === NO_CATEGORY) list = list.filter((b) => !st(b).category);
+  else if (ui.category) list = list.filter((b) => st(b).category === ui.category);
   if (tab === 'fav') list = list.filter((b) => st(b).fav);
   else if (tab in STATUS) list = list.filter((b) => (st(b).status || 'unread') === tab);
   return [...list].sort((a, b) => recency(b) - recency(a) || a.title.localeCompare(b.title, 'ja', { numeric: true }));
@@ -175,7 +195,7 @@ function renderTabs() {
 function cardHtml(book, row) {
   const s = st(book);
   const status = s.status || 'unread';
-  const dl = ui.downloads[book.key];
+  const dl = isDownloaded(book.key);
   const prog = ui.progress[book.key];
   const p = progressOf(book);
   return `<button class="card" data-act="book" data-key="${esc(book.key)}" aria-label="${esc(book.title)}">
@@ -195,7 +215,7 @@ function renderLibrary() {
   // 書き直しても各段の横スクロール位置は保つ（ダウンロード中は何度も書き直すため）
   const scrolls = {};
   document.querySelectorAll('.rack-books').forEach((el) => (scrolls[el.dataset.row] = el.scrollLeft));
-  $('#view').innerHTML = `<div class="rack">${RACK_ROWS.map(([id, label]) => {
+  $('#view').innerHTML = `${categoryBarHtml()}<div class="rack">${RACK_ROWS.map(([id, label]) => {
     const list = booksForTab(id);
     return `<section class="rack-row">
       <div class="rack-books" data-row="${id}">${list.length ? list.map((b) => cardHtml(b, id)).join('') : '<p class="rack-empty">まだありません</p>'}</div>
@@ -205,36 +225,39 @@ function renderLibrary() {
   document.querySelectorAll('.rack-books').forEach((el) => (el.scrollLeft = scrolls[el.dataset.row] || 0));
 }
 
-// ---------- メモ一覧 ----------
+/** 本棚の上のカテゴリ絞り込み。カテゴリが 1 つもなければ出さない */
+function categoryBarHtml() {
+  const cats = categories();
+  if (!cats.length) {
+    ui.category = '';
+    return '';
+  }
+  if (ui.category && ui.category !== NO_CATEGORY && !cats.includes(ui.category)) ui.category = '';
+  const items = [['', 'すべて'], ...cats.map((c) => [c, c])];
+  if (ui.books.some((b) => !st(b).category)) items.push([NO_CATEGORY, '未分類']);
+  return `<div class="cat-bar">${items
+    .map(([v, l]) => `<button class="chip ${ui.category === v ? 'on' : ''}" data-act="cat-filter" data-cat="${esc(v)}">${esc(l)}</button>`)
+    .join('')}</div>`;
+}
+
+// ---------- メモ一覧（1 冊に 1 枚） ----------
 
 async function renderMemoList() {
-  const memos = (await allMemos()).filter((m) => findBook(m.key) && (!ui.memoFilter || m.key === ui.memoFilter));
-  const pointBooks = ui.books.filter((b) => b.points.length && (!ui.memoFilter || b.key === ui.memoFilter));
-  const options = ui.books
-    .filter((b) => b.points.length || memos.some((m) => m.key === b.key) || b.key === ui.memoFilter)
-    .map((b) => `<option value="${esc(b.key)}" ${b.key === ui.memoFilter ? 'selected' : ''}>${esc(b.title)}</option>`)
-    .join('');
-  const points = pointBooks.length
-    ? `<details class="points" ${ui.memoFilter ? 'open' : ''}><summary>要点（${pointBooks.reduce((n, b) => n + b.points.length, 0)}）</summary>
-      ${pointBooks.map((b) => b.points.map((p) => `<div class="memo point" data-act="open-book" data-key="${esc(b.key)}"><div class="memo-head">${esc(b.title)}</div><div class="memo-text">${esc(p.text || p.name.replace(/\.txt$/i, '').replace(/^🟥/, ''))}</div></div>`).join('')).join('')}
-    </details>`
-    : '';
+  const memos = (await allMemos()).filter((m) => findBook(m.key));
+  const pointsOnly = ui.books.filter((b) => b.points.length && !memos.some((m) => m.key === b.key));
   if (ui.screen !== 'library' || ui.tab !== 'memo') return;
+  const cards = [...memos.map((m) => memoCardHtml(findBook(m.key), m.text)), ...pointsOnly.map((b) => memoCardHtml(b, ''))];
   $('#view').innerHTML = `<div class="memo-list">
-    <select class="memo-filter" data-act="memo-filter"><option value="">すべての本</option>${options}</select>
-    ${points}
-    ${memos.length ? memos.map((m) => memoItemHtml(m, true)).join('') : '<div class="empty">メモはまだありません。<br>本を開いて ✎ から書けます。</div>'}
+    ${cards.length ? cards.join('') : '<div class="empty">メモはまだありません。<br>本を開いて ✎ から書けます。</div>'}
   </div>`;
 }
 
-function memoItemHtml(m, withTitle) {
-  const book = findBook(m.key);
-  const place = placeLabel(m);
-  return `<div class="memo" data-act="jump-memo" data-key="${esc(m.key)}" data-id="${esc(m.id)}">
-    <div class="memo-head">${withTitle ? `<b>${esc(book?.title)}</b> ` : ''}<span>${m.at ? fmtDate(m.at) : ''}</span>${place ? `<span class="place">▶ ${esc(place)}</span>` : ''}</div>
-    <div class="memo-text">${esc(m.text)}</div>
-    <div class="memo-tools"><button class="link" data-act="edit-memo" data-key="${esc(m.key)}" data-id="${esc(m.id)}">編集</button><button class="link danger" data-act="del-memo" data-key="${esc(m.key)}" data-id="${esc(m.id)}">削除</button></div>
-  </div>`;
+function memoCardHtml(book, text) {
+  return `<button class="memo" data-act="memo-open" data-key="${esc(book.key)}">
+    <div class="memo-head"><b>${esc(book.title)}</b></div>
+    ${book.points.map((p) => `<div class="memo-point">${esc(pointText(p))}</div>`).join('')}
+    ${text ? `<div class="memo-text">${esc(text)}</div>` : ''}
+  </button>`;
 }
 
 // ---------- 本の詳細シート ----------
@@ -242,7 +265,8 @@ function memoItemHtml(m, withTitle) {
 function renderBookSheet(book) {
   ui.sheetBookKey = book.key;
   const s = st(book);
-  const dl = ui.downloads[book.key];
+  const dl = isDownloaded(book.key) && ui.downloads[book.key];
+  const partial = !dl && ui.downloads[book.key];
   const prog = ui.progress[book.key];
   const total = [book.pdf, book.mindmap, ...book.summary, ...book.full].filter(Boolean).reduce((n, f) => n + (f.size || 0), 0);
   const parts = [
@@ -255,8 +279,15 @@ function renderBookSheet(book) {
     ? `<div class="dl-progress"><span>ダウンロード中 ${mb(prog.done)} / ${mb(prog.total)}</span><span class="bar big"><i style="width:${((prog.done / prog.total) * 100).toFixed(1)}%"></i></span></div>`
     : dl
       ? `<div class="dl-done">ダウンロード済み・あと${daysLeft(dl)}日で端末から削除 <button class="link danger" data-act="remove-dl" data-key="${esc(book.key)}">今すぐ削除</button></div>`
-      : `<button class="btn ghost" data-act="download" data-key="${esc(book.key)}">⤓ ダウンロード（${mb(total)}）</button>`;
+      : `<button class="btn ghost" data-act="download" data-key="${esc(book.key)}">⤓ ${partial ? '続きからダウンロード' : 'ダウンロード'}（${mb(total)}）</button>`;
   const canOpen = dl || navigator.onLine;
+  const cats = categories();
+  const catHtml = `<label class="cat-row">カテゴリ
+    <select data-act="set-category" data-key="${esc(book.key)}">
+      <option value="">なし</option>
+      ${cats.map((c) => `<option ${s.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+      <option value="__new">＋ 新しいカテゴリ…</option>
+    </select></label>`;
   openSheet(`
     <div class="book-sheet">
       <div class="cover small" data-cover="${esc(book.key)}">${coverHtml(book)}</div>
@@ -267,26 +298,40 @@ function renderBookSheet(book) {
       </div>
     </div>
     <div class="seg">${Object.entries(STATUS).map(([k, v]) => `<button class="${(s.status || 'unread') === k ? 'on' : ''}" data-act="status" data-key="${esc(book.key)}" data-status="${k}">${v}</button>`).join('')}</div>
+    ${catHtml}
     ${dlHtml}
     <button class="btn primary" data-act="open-book" data-key="${esc(book.key)}" ${canOpen ? '' : 'disabled'}>${canOpen ? '開く' : 'オフライン中（ダウンロードしていません）'}</button>
   `);
 }
 
+// ダウンロードは Wi-Fi が基本。モバイル通信のときは容量を見せて確認する
 async function startDownload(book) {
   if (ui.progress[book.key]) return;
+  if (!navigator.onLine) return toast('オフラインなのでダウンロードできません');
+  let cellularOk = false;
+  if (onCellular()) {
+    const bytes = await remainingBytes(book);
+    if (!confirm(`モバイル通信で${mb(bytes)}ダウンロードします。いいですか？`)) return;
+    cellularOk = true;
+  }
   ui.progress[book.key] = { done: 0, total: 1 };
   let last = 0;
   try {
-    await downloadBook(book, (done, total) => {
-      ui.progress[book.key] = { done, total: total || 1 };
-      if (Date.now() - last > 400) {
-        last = Date.now();
-        refresh();
-      }
-    });
+    await downloadBook(
+      book,
+      (done, total) => {
+        ui.progress[book.key] = { done, total: total || 1 };
+        if (Date.now() - last > 400) {
+          last = Date.now();
+          refresh();
+        }
+      },
+      () => !cellularOk && onCellular(), // Wi-Fi が切れてモバイル通信になったら止める
+    );
     toast(`「${book.title}」をダウンロードしました`);
   } catch (e) {
-    toast('ダウンロードに失敗しました：' + e.message);
+    if (e instanceof DownloadStopped) toast('Wi-Fi が切れたので止めました。続きは Wi-Fi につないでから');
+    else toast('ダウンロードに失敗しました：' + e.message);
   }
   delete ui.progress[book.key];
   ui.downloads = await downloads();
@@ -493,53 +538,29 @@ onPlayer((ev) => {
   renderMini();
 });
 
-// ---------- メモの入力シート ----------
+// ---------- メモ（1 冊に 1 枚） ----------
 
-function currentPlace(book) {
-  const place = {};
-  const ps = playerState();
-  if (ps.book?.key === book.key) Object.assign(place, { kind: ps.kind, i: ps.i, t: ps.t });
-  if (ui.reader?.book.key === book.key && ui.reader.pdf) place.page = ui.reader.pdf.page;
-  return place;
-}
-
-async function openMemoSheet(book, editing) {
-  const place = editing ? null : currentPlace(book);
-  const memos = (await bookMemos(book.key)).sort((a, b) => b.at - a.at);
+async function openMemoSheet(book) {
+  const original = await getMemo(book.key);
+  const inReader = ui.reader?.book.key === book.key;
   openSheet(
-    `<h3>${editing ? 'メモを編集' : 'メモを書く'}</h3>
-    ${place && placeLabel(place) ? `<p class="muted">位置：${esc(placeLabel(place))}</p>` : ''}
-    <textarea class="memo-input" rows="4" placeholder="気づいたこと・覚えておきたいこと">${editing ? esc(editing.text) : ''}</textarea>
-    <div class="row"><button class="btn ghost" data-act="close-sheet">やめる</button><button class="btn primary" data-act="save-memo">保存</button></div>
-    ${!editing && (book.points.length || memos.length) ? `<div class="sheet-memos">
-      ${book.points.map((p) => `<div class="memo point"><div class="memo-head">要点</div><div class="memo-text">${esc(p.text || p.name.replace(/\.txt$/i, '').replace(/^🟥/, ''))}</div></div>`).join('')}
-      ${memos.map((m) => memoItemHtml({ ...m, key: book.key }, false)).join('')}</div>` : ''}`,
+    `<h3>メモ</h3>
+    <p class="muted small">${esc(book.title)}</p>
+    ${book.points.map((p) => `<div class="memo-point">${esc(pointText(p))}</div>`).join('')}
+    <textarea class="memo-input memo-page" rows="12" placeholder="この本について覚えておきたいこと">${esc(original)}</textarea>
+    <div class="row">${inReader ? '' : `<button class="btn ghost" data-act="open-book" data-key="${esc(book.key)}">本を開く</button>`}<button class="btn primary" data-act="close-sheet">保存して閉じる</button></div>`,
     (body) => {
       const ta = body.querySelector('textarea');
-      ta.focus();
-      body.querySelector('[data-act="save-memo"]').onclick = async () => {
-        const text = ta.value.trim();
-        if (!text) return;
-        if (editing) await editMemo(book, editing.id, text);
-        else await addMemo(book, { text, ...place });
-        closeSheet();
-        toast('メモを保存しました');
-        refresh();
+      // 閉じ方（ボタン・外側タップ・本を開く）に関係なく、書き換えていれば保存する
+      ui.onSheetClose = () => {
+        if (ta.value === original) return;
+        saveMemo(book, ta.value).then(() => {
+          toast('メモを保存しました');
+          if (ui.screen === 'library' && ui.tab === 'memo') renderMemoList();
+        });
       };
     },
   );
-}
-
-async function jumpToMemo(key, id) {
-  const book = findBook(key);
-  if (!book) return;
-  const m = (await bookMemos(key)).find((x) => x.id === id);
-  if (!m) return;
-  await openReader(book, m.page ? { view: 'pdf', page: m.page } : {});
-  if (m.kind && tracksOf(book, m.kind).length) {
-    ui.reader.kind = m.kind;
-    await loadAudio(book, m.kind, { i: m.i, t: m.t, autoplay: true });
-  }
 }
 
 // ---------- 設定・フォルダ登録 ----------
@@ -554,10 +575,14 @@ async function renderSettings() {
     </section>
     <section><h3>ダウンロード済み（${dls.length}冊）</h3>
       <p class="muted">最後に開いてから 2 週間で端末から自動で消えます（Dropbox 側は消えません）。${est ? `端末で使用中 ${mb(est.usage || 0)}` : ''}</p>
-      ${dls.map(([k, d]) => `<div class="row-item"><span>${esc(findBook(k)?.title || k)}<small class="muted"> ・ あと${daysLeft(d)}日</small></span><button class="link danger" data-act="remove-dl" data-key="${esc(k)}">削除</button></div>`).join('')}
+      ${dls.map(([k, d]) => `<div class="row-item"><span>${esc(findBook(k)?.title || k)}<small class="muted"> ・ ${d.complete === false ? '途中まで' : `あと${daysLeft(d)}日`}</small></span><button class="link danger" data-act="remove-dl" data-key="${esc(k)}">削除</button></div>`).join('')}
+    </section>
+    <section><h3>カテゴリ</h3>
+      <p class="muted">本の詳細でカテゴリを付けると、ここに出ます。</p>
+      ${categories().map((c) => `<div class="row-item"><span>${esc(c)}<small class="muted"> ・ ${ui.books.filter((b) => st(b).category === c).length}冊</small></span><span><button class="link" data-act="rename-category" data-cat="${esc(c)}">名前を変える</button><button class="link danger" data-act="remove-category" data-cat="${esc(c)}">外す</button></span></div>`).join('')}
     </section>
     <section><h3>同期</h3>
-      <p class="muted">状態・再生位置は各登録フォルダの「_脱ツンドク.json」、メモは本のフォルダの「⑥メモ_書名.md」に保存します。</p>
+      <p class="muted">状態・再生位置・カテゴリは各登録フォルダの「_脱ツンドク.json」、メモは本のフォルダの「⑥メモ_書名.md」に保存します。</p>
       <button class="btn ghost" data-act="sync">今すぐ同期</button>
     </section>
     <section><h3>アカウント</h3>
@@ -690,21 +715,28 @@ const actions = {
   'mini-play': () => toggle(),
   'mini-skip': (el) => skip(+el.dataset.d),
   'memo-sheet': () => openMemoSheet(ui.reader.book),
-  'jump-memo': (el, ev) => {
-    if (ev.target.closest('.memo-tools')) return;
-    closeSheet();
-    jumpToMemo(el.dataset.key, el.dataset.id);
+  'memo-open': (el) => {
+    const b = findBook(el.dataset.key);
+    if (b) openMemoSheet(b);
   },
-  'edit-memo': async (el) => {
-    const book = findBook(el.dataset.key);
-    const m = (await bookMemos(el.dataset.key)).find((x) => x.id === el.dataset.id);
-    if (book && m) openMemoSheet(book, m);
+  'cat-filter': (el) => {
+    ui.category = el.dataset.cat;
+    kvSet('category-filter', ui.category);
+    renderLibrary();
   },
-  'del-memo': async (el) => {
-    if (!confirm('このメモを削除しますか？')) return;
-    await deleteMemo(findBook(el.dataset.key), el.dataset.id);
-    closeSheet();
-    if (ui.tab === 'memo') renderMemoList();
+  'rename-category': (el) => {
+    const from = el.dataset.cat;
+    const to = prompt('新しいカテゴリ名', from)?.trim();
+    if (!to || to === from) return;
+    for (const b of ui.books) if (st(b).category === from) updateBook(b.key, { category: to });
+    if (ui.category === from) ui.category = to;
+    renderSettings();
+  },
+  'remove-category': (el) => {
+    const cat = el.dataset.cat;
+    if (!confirm(`「${cat}」を外します（本は消えず、未分類になります）`)) return;
+    for (const b of ui.books) if (st(b).category === cat) updateBook(b.key, { category: null });
+    renderSettings();
   },
   settings: () => go('settings'),
   back: () => go('library'),
@@ -762,9 +794,14 @@ document.addEventListener('change', (ev) => {
     if (ps.book?.key === r.book.key && ps.kind === r.kind) selectTrack(+el.value);
     else loadAudio(r.book, r.kind, { i: +el.value, t: 0 });
   }
-  if (el.dataset.act === 'memo-filter') {
-    ui.memoFilter = el.value;
-    renderMemoList();
+  if (el.dataset.act === 'set-category') {
+    let cat = el.value;
+    if (cat === '__new') {
+      cat = prompt('カテゴリ名（例：不動産、ビジネス、歴史）')?.trim();
+      if (!cat) return refresh(); // やめたら選択を元に戻す
+    }
+    updateBook(el.dataset.key, { category: cat || null });
+    refresh();
   }
 });
 addEventListener('online', () => refresh());
@@ -831,6 +868,7 @@ async function boot() {
   if (!hasAppKey()) return go('setup');
   if (!(await isLoggedIn())) return go('login');
   ui.folders = (await kvGet('folders')) || [];
+  ui.category = (await kvGet('category-filter')) || '';
   if (!ui.folders.length) {
     ui.pickerPath = '';
     return go('picker');

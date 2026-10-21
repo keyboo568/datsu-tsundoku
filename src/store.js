@@ -88,12 +88,23 @@ export async function downloads() {
   return (await kvGet('downloads')) || {};
 }
 
-/** 1 冊ぶんをダウンロードする。onProgress(受信バイト, 合計バイト) */
-export async function downloadBook(book, onProgress) {
+/** まだ端末にない分のバイト数（ダウンロード前の確認用） */
+export async function remainingBytes(book) {
+  const prev = (await downloads())[book.key];
+  return bookFiles(book)
+    .filter((f) => prev?.files[f.path]?.rev !== f.rev)
+    .reduce((s, f) => s + (f.size || 0), 0);
+}
+
+export class DownloadStopped extends Error {}
+
+/** 1 冊ぶんをダウンロードする。onProgress(受信バイト, 合計バイト)。
+ *  shouldStop() が true を返したら途中で止める（済んだファイルは残すので、次は続きから） */
+export async function downloadBook(book, onProgress, shouldStop = () => false) {
   if (navigator.storage.persist) navigator.storage.persist();
   const all = await downloads();
   const prev = all[book.key];
-  const meta = { files: {}, downloadedAt: Date.now(), lastOpened: prev?.lastOpened || Date.now() };
+  const meta = { files: {}, downloadedAt: Date.now(), lastOpened: prev?.lastOpened || Date.now(), complete: false };
   const dir = await (await booksDir()).getDirectoryHandle('b' + hash(book.key), { create: true });
   const files = bookFiles(book);
   const total = files.reduce((s, f) => s + (f.size || 0), 0);
@@ -111,6 +122,11 @@ export async function downloadBook(book, onProgress) {
     const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
     const reader = res.body.getReader();
     for (;;) {
+      if (shouldStop()) {
+        await reader.cancel();
+        await writable.abort();
+        throw new DownloadStopped();
+      }
       const { done: end, value } = await reader.read();
       if (end) break;
       await writable.write(value);
@@ -119,7 +135,10 @@ export async function downloadBook(book, onProgress) {
     }
     await writable.close();
     meta.files[f.path] = { name, rev: f.rev };
+    all[book.key] = meta;
+    await kvSet('downloads', all);
   }
+  meta.complete = true;
   all[book.key] = meta;
   await kvSet('downloads', all);
 }

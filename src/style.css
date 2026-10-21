@@ -198,20 +198,31 @@ body.mock .mock-tag { display: inline-block; }
 .fav-toggle.on { color: var(--fav); border-color: var(--fav); font-weight: 700; }
 .dl-progress, .dl-done { margin-top: 12px; font-size: 13px; }
 .memo-input { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); resize: vertical; }
-.sheet-memos { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
 
-/* ---------- メモ ---------- */
-.memo-list { padding: 0 16px 24px; }
-.memo-filter { width: 100%; padding: 9px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); margin-bottom: 12px; }
-.memo { padding: 12px 0; border-bottom: 1px solid var(--line); }
-.memo-head { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; }
-.memo-head b { color: var(--ink); font-size: 13px; width: 100%; }
-.memo-head .place { color: var(--accent); }
-.memo-text { white-space: pre-wrap; margin-top: 4px; }
-.memo-tools { text-align: right; }
-.memo.point .memo-text { font-weight: 600; }
-.points { margin-bottom: 8px; background: var(--surface); border-radius: 10px; padding: 8px 12px; }
-.points summary { font-weight: 700; }
+/* ---------- カテゴリ ---------- */
+.cat-bar { display: flex; gap: 6px; overflow-x: auto; padding: 0 12px 10px; scrollbar-width: none; }
+.cat-bar::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none; border: 1px solid var(--line); background: transparent; border-radius: 999px;
+  padding: 4px 12px; font-size: 13px; white-space: nowrap; color: var(--muted);
+}
+.chip.on { border-color: var(--accent); color: var(--accent); font-weight: 700; background: var(--surface); }
+.cat-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 14px; }
+.cat-row select { flex: 1; max-width: 70%; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
+
+/* ---------- メモ（1 冊に 1 枚） ---------- */
+.memo-list { padding: 0 16px 24px; display: flex; flex-direction: column; gap: 10px; }
+.memo {
+  display: block; width: 100%; text-align: left; border: 1px solid var(--line); background: var(--surface);
+  border-radius: 12px; padding: 12px 14px;
+}
+.memo-head b { font-size: 14px; }
+.memo-text {
+  white-space: pre-wrap; margin-top: 6px; font-size: 14px; color: var(--ink);
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+}
+.memo-point { margin-top: 6px; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--bg); font-size: 13px; font-weight: 600; }
+.memo-page { margin-top: 10px; min-height: 40vh; line-height: 1.7; }
 
 /* ---------- 設定・フォルダ選択 ---------- */
 .settings, .picker, .welcome { padding: 0 16px 24px; }
