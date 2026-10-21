@@ -17,17 +17,20 @@ import { showMindmap } from './mindmap.js';
 const VERSION = 'v1.00';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
-  ['all', 'すべて'],
+  ['shelf', '本棚'],
+  ['memo', 'メモ'],
+];
+// 本棚の段（上から）
+const RACK_ROWS = [
   ['reading', '読書中'],
   ['unread', '未読'],
+  ['fav', '★ お気に入り'],
   ['done', '既読'],
-  ['fav', '★'],
-  ['memo', 'メモ'],
 ];
 
 const ui = {
   screen: 'library', // library | settings | picker | login | setup
-  tab: 'all',
+  tab: 'shelf',
   books: [],
   folders: [],
   downloads: {},
@@ -163,37 +166,43 @@ function booksForTab(tab) {
 }
 
 function renderTabs() {
-  $('#tabs').innerHTML = TABS.map(([id, label]) => {
-    const n = id === 'memo' ? '' : `<small>${booksForTab(id).length}</small>`;
-    return `<button class="tab ${ui.tab === id ? 'on' : ''}" data-act="tab" data-tab="${id}">${label}${n}</button>`;
-  }).join('');
+  $('#tabs').innerHTML = TABS.map(
+    ([id, label]) => `<button class="tab ${ui.tab === id ? 'on' : ''}" data-act="tab" data-tab="${id}">${label}</button>`,
+  ).join('');
 }
 
-function cardHtml(book) {
+// 本は表紙を正面に向けて立てかける（面陳）。段で状態がわかるので、状態バッジは ★ の段でだけ出す
+function cardHtml(book, row) {
   const s = st(book);
   const status = s.status || 'unread';
   const dl = ui.downloads[book.key];
   const prog = ui.progress[book.key];
   const p = progressOf(book);
-  return `<button class="card" data-act="book" data-key="${esc(book.key)}">
+  return `<button class="card" data-act="book" data-key="${esc(book.key)}" aria-label="${esc(book.title)}">
     <div class="cover" data-cover="${esc(book.key)}">${coverHtml(book)}</div>
-    ${s.fav ? '<span class="badge fav">★</span>' : ''}
-    ${status !== 'unread' ? `<span class="badge status ${status}">${STATUS[status]}</span>` : ''}
+    ${s.fav && row !== 'fav' ? '<span class="badge fav">★</span>' : ''}
+    ${row === 'fav' && status !== 'unread' ? `<span class="badge status ${status}">${STATUS[status]}</span>` : ''}
     <span class="badge dl ${dl ? 'on' : ''}">${prog ? Math.floor((prog.done / prog.total) * 100) + '%' : dl ? '✓' : '⤓'}</span>
     ${p !== null ? `<span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span>` : ''}
-    <span class="card-title">${esc(book.title)}</span>
   </button>`;
 }
 
 function renderLibrary() {
-  const list = booksForTab(ui.tab);
   if (!ui.books.length) {
     $('#view').innerHTML = `<div class="empty">本が見つかりません。<br>登録フォルダの中に「1冊＝1フォルダ」で PDF や音声を置いてください。<br><button class="btn" data-act="settings">設定を開く</button></div>`;
     return;
   }
-  $('#view').innerHTML = list.length
-    ? `<div class="shelf">${list.map(cardHtml).join('')}</div>`
-    : `<div class="empty">この棚は空です</div>`;
+  // 書き直しても各段の横スクロール位置は保つ（ダウンロード中は何度も書き直すため）
+  const scrolls = {};
+  document.querySelectorAll('.rack-books').forEach((el) => (scrolls[el.dataset.row] = el.scrollLeft));
+  $('#view').innerHTML = `<div class="rack">${RACK_ROWS.map(([id, label]) => {
+    const list = booksForTab(id);
+    return `<section class="rack-row">
+      <div class="rack-books" data-row="${id}">${list.length ? list.map((b) => cardHtml(b, id)).join('') : '<p class="rack-empty">まだありません</p>'}</div>
+      <div class="rack-board"><span class="plate">${label}<small>${list.length}</small></span></div>
+    </section>`;
+  }).join('')}</div>`;
+  document.querySelectorAll('.rack-books').forEach((el) => (el.scrollLeft = scrolls[el.dataset.row] || 0));
 }
 
 // ---------- メモ一覧 ----------
