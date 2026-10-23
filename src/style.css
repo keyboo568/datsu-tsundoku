@@ -146,7 +146,10 @@ body.mock .mock-tag { display: inline-block; }
 }
 .cover-fallback span { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
 .badge { position: absolute; font-size: 11px; line-height: 1; padding: 3px 5px; border-radius: 4px; font-weight: 700; }
-.badge.fav { top: 4px; left: 4px; background: rgba(0, 0, 0, 0.55); color: var(--fav); font-size: 13px; }
+.flags { position: absolute; top: 4px; left: 4px; display: flex; gap: 3px; }
+.flags .badge { position: static; background: rgba(0, 0, 0, 0.55); font-size: 13px; }
+.badge.fav { color: var(--fav); }
+.badge.reread { color: #8fd3ff; }
 .badge.status { top: 4px; right: 4px; color: #fff; }
 .badge.status.reading { background: var(--reading); }
 .badge.status.done { background: var(--done); }
@@ -196,6 +199,8 @@ body.mock .mock-tag { display: inline-block; }
 .book-info p { margin: 6px 0; font-size: 13px; }
 .fav-toggle { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 12px; }
 .fav-toggle.on { color: var(--fav); border-color: var(--fav); font-weight: 700; }
+.fav-toggle.reread.on { color: #2f7fb5; border-color: #2f7fb5; }
+.flag-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .dl-progress, .dl-done { margin-top: 12px; font-size: 13px; }
 .memo-input { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); resize: vertical; }
 

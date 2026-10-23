@@ -15,7 +15,7 @@ import {
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.04';
+const VERSION = 'v1.05';
 const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
@@ -27,6 +27,7 @@ const RACK_ROWS = [
   ['reading', '読書中'],
   ['unread', '未読'],
   ['fav', '★ お気に入り'],
+  ['reread', '↻ 再読'],
   ['done', '既読'],
 ];
 
@@ -177,6 +178,7 @@ function booksForTab(tab) {
   if (ui.category === NO_CATEGORY) list = list.filter((b) => !st(b).category);
   else if (ui.category) list = list.filter((b) => st(b).category === ui.category);
   if (tab === 'fav') list = list.filter((b) => st(b).fav);
+  else if (tab === 'reread') list = list.filter((b) => st(b).reread);
   else if (tab in STATUS) list = list.filter((b) => (st(b).status || 'unread') === tab);
   return [...list].sort((a, b) => recency(b) - recency(a) || a.title.localeCompare(b.title, 'ja', { numeric: true }));
 }
@@ -187,7 +189,7 @@ function renderTabs() {
   ).join('');
 }
 
-// 本は表紙を正面に向けて立てかける（面陳）。段で状態がわかるので、状態バッジは ★ の段でだけ出す
+// 本は表紙を正面に向けて立てかける（面陳）。段で状態がわかるので、状態バッジは ★ と ↻ の段でだけ出す
 function cardHtml(book, row) {
   const s = st(book);
   const status = s.status || 'unread';
@@ -196,8 +198,8 @@ function cardHtml(book, row) {
   const p = progressOf(book);
   return `<button class="card" data-act="book" data-key="${esc(book.key)}" aria-label="${esc(book.title)}">
     <div class="cover" data-cover="${esc(book.key)}">${coverHtml(book)}</div>
-    ${s.fav && row !== 'fav' ? '<span class="badge fav">★</span>' : ''}
-    ${row === 'fav' && status !== 'unread' ? `<span class="badge status ${status}">${STATUS[status]}</span>` : ''}
+    <span class="flags">${s.fav && row !== 'fav' ? '<span class="badge fav">★</span>' : ''}${s.reread && row !== 'reread' ? '<span class="badge reread">↻</span>' : ''}</span>
+    ${(row === 'fav' || row === 'reread') && status !== 'unread' ? `<span class="badge status ${status}">${STATUS[status]}</span>` : ''}
     <span class="badge dl ${dl ? 'on' : ''}">${prog ? Math.floor((prog.done / prog.total) * 100) + '%' : dl ? '✓' : '⤓'}</span>
     ${p !== null ? `<span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span>` : ''}
   </button>`;
@@ -262,9 +264,8 @@ function renderBookSheet(book) {
   ui.sheetBookKey = book.key;
   const s = st(book);
   const dl = isDownloaded(book.key) && ui.downloads[book.key];
-  const partial = !dl && ui.downloads[book.key];
   const prog = ui.progress[book.key];
-  const total = [book.pdf, book.mindmap, ...book.summary, ...book.full].filter(Boolean).reduce((n, f) => n + (f.size || 0), 0);
+  const pdfLocal = book.pdf && ui.downloads[book.key]?.files[book.pdf.path];
   const parts = [
     book.summary.length && `概要版 ${book.summary.length}本`,
     book.full.length && `網羅版 ${book.full.length}本`,
@@ -275,7 +276,10 @@ function renderBookSheet(book) {
     ? `<div class="dl-progress"><span>ダウンロード中 ${mb(prog.done)} / ${mb(prog.total)}</span><span class="bar big"><i style="width:${((prog.done / prog.total) * 100).toFixed(1)}%"></i></span></div>`
     : dl
       ? `<div class="dl-done">ダウンロード済み・あと${daysLeft(dl)}日で端末から削除 <button class="link danger" data-act="remove-dl" data-key="${esc(book.key)}">今すぐ削除</button></div>`
-      : `<button class="btn ghost" data-act="download" data-key="${esc(book.key)}">⤓ ${partial ? '続きからダウンロード' : 'ダウンロード'}（${mb(total)}）</button>`;
+      : `<div class="dl-done muted">まだダウンロードしていません（本をタップするとダウンロードします）</div>`;
+  const pdfHtml = book.pdf
+    ? `<div class="dl-done muted">PDF：${pdfLocal ? 'ダウンロード済み' : `読む画面で PDF タブを押したときにダウンロード（${mb(book.pdf.size || 0)}）`}</div>`
+    : '';
   const canOpen = dl || navigator.onLine;
   const cats = categories();
   const catHtml = `<label class="cat-row">カテゴリ
@@ -290,26 +294,35 @@ function renderBookSheet(book) {
       <div class="book-info">
         <h2>${esc(book.title)}</h2>
         <p class="muted">${parts.join(' ・ ') || '中身がありません'}</p>
-        <button class="fav-toggle ${s.fav ? 'on' : ''}" data-act="fav" data-key="${esc(book.key)}">${s.fav ? '★ お気に入り' : '☆ お気に入りにする'}</button>
+        <div class="flag-row">
+          <button class="fav-toggle ${s.fav ? 'on' : ''}" data-act="fav" data-key="${esc(book.key)}">${s.fav ? '★ お気に入り' : '☆ お気に入り'}</button>
+          <button class="fav-toggle reread ${s.reread ? 'on' : ''}" data-act="reread" data-key="${esc(book.key)}">↻ 再読${s.reread ? '中' : 'する'}</button>
+        </div>
       </div>
     </div>
     <div class="seg">${Object.entries(STATUS).map(([k, v]) => `<button class="${(s.status || 'unread') === k ? 'on' : ''}" data-act="status" data-key="${esc(book.key)}" data-status="${k}">${v}</button>`).join('')}</div>
     ${catHtml}
     ${dlHtml}
+    ${pdfHtml}
     <button class="btn primary" data-act="open-book" data-key="${esc(book.key)}" ${canOpen ? '' : 'disabled'}>${canOpen ? '開く' : 'オフライン中（ダウンロードしていません）'}</button>
   `);
 }
 
-// ダウンロードは Wi-Fi が基本。モバイル通信のときは容量を見せて確認する
-async function startDownload(book) {
-  if (ui.progress[book.key]) return;
-  if (!navigator.onLine) return toast('オフラインなのでダウンロードできません');
-  let cellularOk = false;
-  if (onCellular()) {
-    const bytes = await remainingBytes(book);
-    if (!confirm(`モバイル通信で${mb(bytes)}ダウンロードします。いいですか？`)) return;
-    cellularOk = true;
-  }
+/** モバイル通信なら容量を見せて確認する。Wi-Fi なら聞かない。
+ *  戻り値：null＝やめる / { cellularOk }＝進める（cellularOk が false なら Wi-Fi が切れたら止める） */
+function askNetwork(bytes, what = '') {
+  if (!onCellular()) return { cellularOk: false };
+  return confirm(`モバイル通信で${what}${mb(bytes)}ダウンロードします。いいですか？`) ? { cellularOk: true } : null;
+}
+
+// 本をタップしたら、未ダウンロードの分（PDF 以外）を自動でダウンロードする
+async function autoDownload(book) {
+  if (ui.progress[book.key] || isDownloaded(book.key) || !navigator.onLine) return;
+  const bytes = await remainingBytes(book);
+  if (!bytes) return;
+  const ok = askNetwork(bytes);
+  if (!ok) return;
+  const { cellularOk } = ok;
   ui.progress[book.key] = { done: 0, total: 1 };
   let last = 0;
   try {
@@ -445,9 +458,9 @@ async function switchView(v) {
     host.innerHTML = '<div class="loading">PDF を読み込み中…</div>';
     r.pdfLoading = (async () => {
       try {
-        const local = await localFile(book.key, book.pdf.path);
-        if (!local && !navigator.onLine) throw new Error('ダウンロードしていないので、オフラインでは開けません');
-        const doc = await openPdf(local || (await dbx.tempLink(book.pdf.path)));
+        const local = (await localFile(book.key, book.pdf.path)) || (await downloadPdf(r, host));
+        if (!local) return;
+        const doc = await openPdf(local);
         if (ui.reader !== r) return closePdf(doc);
         host.innerHTML = '';
         r.pdf = new PdfViewer(host, doc, {
@@ -458,7 +471,6 @@ async function switchView(v) {
           },
         });
         await r.pdf.ready;
-        if (!local) toast('ダウンロードしておくと、PDF が速く開けます');
       } catch (e) {
         host.innerHTML = `<div class="empty">PDF を開けませんでした<br><small>${esc(e.message)}</small></div>`;
       } finally {
@@ -467,6 +479,39 @@ async function switchView(v) {
     })();
     await r.pdfLoading;
   }
+}
+
+/** PDF タブを押したときに PDF をダウンロードする。落とせたら File、やめた・落とせなかったら null */
+async function downloadPdf(r, host) {
+  const { book } = r;
+  const again = 'もう一度 PDF タブを押すとダウンロードします';
+  if (!navigator.onLine) {
+    host.innerHTML = `<div class="empty">PDF はまだダウンロードしていないので、オフラインでは開けません</div>`;
+    return null;
+  }
+  const ok = askNetwork(book.pdf.size || 0, 'PDF を');
+  if (!ok) {
+    host.innerHTML = `<div class="empty">PDF はまだダウンロードしていません<br><small>${again}</small></div>`;
+    return null;
+  }
+  host.innerHTML = `<div class="loading">PDF をダウンロード中… <b class="pdf-dl">0%</b><span class="bar big"><i></i></span></div>`;
+  try {
+    await downloadBook(
+      book,
+      (done, total) => {
+        const pct = ((done / (total || 1)) * 100).toFixed(0) + '%';
+        host.querySelector('.pdf-dl').textContent = pct;
+        host.querySelector('.bar i').style.width = pct;
+      },
+      () => !ok.cellularOk && onCellular(),
+      [book.pdf],
+    );
+  } catch (e) {
+    host.innerHTML = `<div class="empty">${e instanceof DownloadStopped ? 'Wi-Fi が切れたので PDF のダウンロードを止めました' : 'PDF をダウンロードできませんでした：' + esc(e.message)}<br><small>${again}</small></div>`;
+    return null;
+  }
+  ui.downloads = await downloads();
+  return localFile(book.key, book.pdf.path);
 }
 
 /** 読む画面を閉じる。保存していないメモがあって、閉じるのをやめたら false */
@@ -682,7 +727,16 @@ const actions = {
     ui.tab = el.dataset.tab;
     renderView();
   },
-  book: (el) => renderBookSheet(findBook(el.dataset.key)),
+  book: (el) => {
+    const b = findBook(el.dataset.key);
+    renderBookSheet(b);
+    autoDownload(b);
+  },
+  reread: (el) => {
+    const b = findBook(el.dataset.key);
+    updateBook(b.key, { reread: !st(b).reread });
+    refresh();
+  },
   'open-book': (el) => {
     const b = findBook(el.dataset.key);
     if (b) openReader(b);
@@ -696,7 +750,6 @@ const actions = {
     updateBook(el.dataset.key, { status: el.dataset.status });
     refresh();
   },
-  download: (el) => startDownload(findBook(el.dataset.key)),
   'remove-dl': async (el) => {
     if (!confirm('端末からこの本のダウンロードを削除します（Dropbox 側は消えません）')) return;
     await removeDownload(el.dataset.key);

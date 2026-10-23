@@ -82,42 +82,45 @@ async function booksDir() {
   return root.getDirectoryHandle('books', { create: true });
 }
 
-export const bookFiles = (book) => [book.pdf, book.mindmap, ...book.summary, ...book.full].filter(Boolean);
+/** 本をタップしたときに自動で落とすもの。PDF は大きいので含めず、PDF タブを開いたときに別に落とす */
+export const coreFiles = (book) => [book.mindmap, ...book.summary, ...book.full].filter(Boolean);
 
 export async function downloads() {
   return (await kvGet('downloads')) || {};
 }
 
 /** まだ端末にない分のバイト数（ダウンロード前の確認用） */
-export async function remainingBytes(book) {
+export async function remainingBytes(book, files = coreFiles(book)) {
   const prev = (await downloads())[book.key];
-  return bookFiles(book)
-    .filter((f) => prev?.files[f.path]?.rev !== f.rev)
-    .reduce((s, f) => s + (f.size || 0), 0);
+  return files.filter((f) => prev?.files[f.path]?.rev !== f.rev).reduce((s, f) => s + (f.size || 0), 0);
 }
 
 export class DownloadStopped extends Error {}
 
-/** 1 冊ぶんをダウンロードする。onProgress(受信バイト, 合計バイト)。
- *  shouldStop() が true を返したら途中で止める（済んだファイルは残すので、次は続きから） */
-export async function downloadBook(book, onProgress, shouldStop = () => false) {
-  if (navigator.storage.persist) navigator.storage.persist();
+/** その本の記録を読み直してから書き換える（本体と PDF のダウンロードが同時に走っても消し合わないように） */
+async function patchDownload(key, fn) {
   const all = await downloads();
-  const prev = all[book.key];
-  const meta = { files: {}, downloadedAt: Date.now(), lastOpened: prev?.lastOpened || Date.now(), complete: false };
+  all[key] = fn(all[key] || { files: {}, downloadedAt: Date.now(), lastOpened: Date.now(), complete: false });
+  await kvSet('downloads', all);
+}
+
+/** ファイルをダウンロードする（省略時は本体＝PDF 以外）。onProgress(受信バイト, 合計バイト)。
+ *  shouldStop() が true を返したら途中で止める（済んだファイルは残すので、次は続きから） */
+export async function downloadBook(book, onProgress, shouldStop = () => false, files = coreFiles(book)) {
+  if (navigator.storage.persist) navigator.storage.persist();
+  const isCore = files.every((f) => f !== book.pdf);
+  const prev = (await downloads())[book.key];
   const dir = await (await booksDir()).getDirectoryHandle('b' + hash(book.key), { create: true });
-  const files = bookFiles(book);
   const total = files.reduce((s, f) => s + (f.size || 0), 0);
   let done = 0;
-  for (const [i, f] of files.entries()) {
+  for (const f of files) {
     const old = prev?.files[f.path];
     if (old && old.rev === f.rev) {
-      meta.files[f.path] = old;
       done += f.size || 0;
       onProgress?.(done, total);
       continue;
     }
-    const name = 'f' + i + '_' + hash(f.path);
+    const name = 'f_' + hash(f.path);
     const res = await dbx.download(f.path);
     const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
     const reader = res.body.getReader();
@@ -134,13 +137,9 @@ export async function downloadBook(book, onProgress, shouldStop = () => false) {
       onProgress?.(done, total);
     }
     await writable.close();
-    meta.files[f.path] = { name, rev: f.rev };
-    all[book.key] = meta;
-    await kvSet('downloads', all);
+    await patchDownload(book.key, (m) => ({ ...m, downloadedAt: Date.now(), files: { ...m.files, [f.path]: { name, rev: f.rev } } }));
   }
-  meta.complete = true;
-  all[book.key] = meta;
-  await kvSet('downloads', all);
+  if (isCore) await patchDownload(book.key, (m) => ({ ...m, complete: true }));
 }
 
 /** ダウンロード済みのファイルを File で返す。なければ null */
