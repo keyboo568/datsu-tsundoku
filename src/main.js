@@ -15,7 +15,7 @@ import {
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.05';
+const VERSION = 'v1.06';
 const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
@@ -315,16 +315,21 @@ function askNetwork(bytes, what = '') {
   return confirm(`モバイル通信で${what}${mb(bytes)}ダウンロードします。いいですか？`) ? { cellularOk: true } : null;
 }
 
-// 本をタップしたら、未ダウンロードの分（PDF 以外）を自動でダウンロードする
-async function autoDownload(book) {
-  if (ui.progress[book.key] || isDownloaded(book.key) || !navigator.onLine) return;
+// 本をタップしたら、未ダウンロードの分（PDF 以外）を自動でダウンロードする。
+// confirmText を渡すと、モバイル通信のときの確認文をそれに差し替える。ダウンロードが済んでいれば true
+async function autoDownload(book, confirmText) {
+  if (isDownloaded(book.key)) return true;
+  if (ui.progress[book.key] || !navigator.onLine) return false;
   const bytes = await remainingBytes(book);
-  if (!bytes) return;
-  const ok = askNetwork(bytes);
-  if (!ok) return;
-  const { cellularOk } = ok;
+  if (!bytes) return true;
+  let cellularOk = false;
+  if (onCellular()) {
+    if (!confirm(confirmText ? confirmText(bytes) : `モバイル通信で${mb(bytes)}ダウンロードします。いいですか？`)) return false;
+    cellularOk = true;
+  }
   ui.progress[book.key] = { done: 0, total: 1 };
   let last = 0;
+  let ok = false;
   try {
     await downloadBook(
       book,
@@ -333,10 +338,12 @@ async function autoDownload(book) {
         if (Date.now() - last > 400) {
           last = Date.now();
           refresh();
+          if (ui.reader?.book.key === book.key) toast(`ダウンロード中… ${Math.floor((done / (total || 1)) * 100)}%`);
         }
       },
       () => !cellularOk && onCellular(), // Wi-Fi が切れてモバイル通信になったら止める
     );
+    ok = true;
     toast(`「${book.title}」をダウンロードしました`);
   } catch (e) {
     if (e instanceof DownloadStopped) toast('Wi-Fi が切れたので止めました。続きは Wi-Fi につないでから');
@@ -345,6 +352,20 @@ async function autoDownload(book) {
   delete ui.progress[book.key];
   ui.downloads = await downloads();
   refresh();
+  return ok;
+}
+
+/** 音声を読み込む。モバイル通信で未ダウンロードなら、流さずにその場でダウンロードするか聞く */
+async function loadAudioSafely(book, kind, opts) {
+  if (!isDownloaded(book.key) && onCellular()) {
+    const done = await autoDownload(book, (bytes) => `まだダウンロードしていません。モバイル通信で${mb(bytes)}ダウンロードしますか？`);
+    if (!done) return;
+  }
+  try {
+    await loadAudio(book, kind, opts);
+  } catch (e) {
+    toast(e.message);
+  }
 }
 
 // ---------- 読む・聴く画面 ----------
@@ -565,7 +586,7 @@ function mountPlayerPanel(book) {
     delete seekEl.dataset.dragging;
     const ps = playerState();
     if (ps.book?.key === book.key && ps.kind === ui.reader.kind) seek(+seekEl.value);
-    else await loadAudio(book, ui.reader.kind, { i: +el.querySelector('.track-select').value || 0, t: +seekEl.value });
+    else await loadAudioSafely(book, ui.reader.kind, { i: +el.querySelector('.track-select').value || 0, t: +seekEl.value });
   });
   updatePlayerPanel();
 }
@@ -770,14 +791,14 @@ const actions = {
     const r = ui.reader;
     const ps = playerState();
     r.kind = el.dataset.kind;
-    if (ps.book?.key === r.book.key && ps.kind !== r.kind) loadAudio(r.book, r.kind, { autoplay: ps.playing });
+    if (ps.book?.key === r.book.key && ps.kind !== r.kind) loadAudioSafely(r.book, r.kind, { autoplay: ps.playing });
     updatePlayerPanel();
   },
   play: () => {
     const r = ui.reader;
     const ps = playerState();
     if (ps.book?.key === r.book.key && ps.kind === r.kind) toggle();
-    else loadAudio(r.book, r.kind, { autoplay: true }).catch((e) => toast(e.message));
+    else loadAudioSafely(r.book, r.kind, { autoplay: true });
   },
   skip: (el) => {
     const r = ui.reader;
@@ -864,7 +885,7 @@ document.addEventListener('change', (ev) => {
     const r = ui.reader;
     const ps = playerState();
     if (ps.book?.key === r.book.key && ps.kind === r.kind) selectTrack(+el.value);
-    else loadAudio(r.book, r.kind, { i: +el.value, t: 0 });
+    else loadAudioSafely(r.book, r.kind, { i: +el.value, t: 0 });
   }
   if (el.dataset.act === 'set-category') {
     let cat = el.value;
@@ -921,7 +942,7 @@ function askResume() {
         closeSheet();
         await openReader(book);
         ui.reader.kind = kind;
-        loadAudio(book, kind, { autoplay: true }).catch((e) => toast(e.message));
+        loadAudioSafely(book, kind, { autoplay: true });
       };
     },
   );

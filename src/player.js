@@ -63,6 +63,9 @@ async function sourceFor(book, file) {
   const local = await localFile(book.key, file.path);
   if (local) return (objectUrl = URL.createObjectURL(local));
   if (!navigator.onLine) throw new Error('この本はダウンロードされていません（オフライン中）');
+  // モバイル通信のときは、ダウンロードしていない音声をネット経由で流さない（通信量が大きいので）
+  const type = navigator.connection?.type;
+  if (type && type !== 'wifi' && type !== 'ethernet') throw new Error('モバイル通信なので、ダウンロードしていない音声は再生しません');
   return dbx.tempLink(file.path);
 }
 
@@ -140,7 +143,7 @@ export function setSpeed(v) {
 
 export function selectTrack(i) {
   if (!cur) return;
-  return loadAudio(cur.book, cur.kind, { i, t: 0, autoplay: !audio.paused });
+  return loadAudio(cur.book, cur.kind, { i, t: 0, autoplay: !audio.paused }).catch((e) => emit({ error: e.message }));
 }
 
 audio.addEventListener('timeupdate', () => {
@@ -163,7 +166,7 @@ audio.addEventListener('pause', () => {
 audio.addEventListener('ended', () => {
   if (!cur) return;
   if (cur.i + 1 < cur.tracks.length) {
-    loadAudio(cur.book, cur.kind, { i: cur.i + 1, t: 0, autoplay: true });
+    loadAudio(cur.book, cur.kind, { i: cur.i + 1, t: 0, autoplay: true }).catch((e) => emit({ error: e.message }));
   } else {
     savePosition({ finished: true });
     emit('finished');
