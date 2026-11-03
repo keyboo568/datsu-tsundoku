@@ -1,6 +1,7 @@
 // 登録フォルダを読み込んで「本」の一覧を作る。1 フォルダ＝1 冊。フォルダ直下の PDF / 音声 1 つも 1 冊として扱う。
 import { dbx, downloadText } from './dropbox.js';
 import { kvGet, kvSet } from './store.js';
+import { CASE_FILE, refreshCases } from './cases.js';
 
 export const MEMO_PREFIX = '⑥メモ_';
 export const SYNC_FILE = '_脱ツンドク.json';
@@ -50,6 +51,7 @@ async function scanRoot(root) {
   const rootLower = root.toLowerCase();
   const groups = new Map();
   const books = [];
+  const caseFiles = [];
   for (const e of entries) {
     const lower = e.path.toLowerCase();
     if (!lower.startsWith(rootLower + '/')) continue;
@@ -59,6 +61,8 @@ async function scanRoot(root) {
     } else if (parts.length === 2 && e.tag === 'file') {
       if (!groups.has(parts[0])) groups.set(parts[0], []);
       groups.get(parts[0]).push(e);
+    } else if (parts.length === 1 && e.tag === 'file' && CASE_FILE.test(e.name)) {
+      caseFiles.push(e);
     } else if (parts.length === 1 && e.tag === 'file' && (/\.pdf$/i.test(e.name) || AUDIO.test(e.name))) {
       books.push(makeBook(root, cleanTitle(stripExt(e.name)), e.name, null, [e]));
     }
@@ -67,7 +71,7 @@ async function scanRoot(root) {
     if (!files.length) continue;
     books.push(makeBook(root, cleanTitle(name), name, root + '/' + name, files));
   }
-  return books;
+  return { books, caseFiles };
 }
 
 /** 要点 .txt の中身を読む（前回の結果は rev が同じなら使い回す） */
@@ -90,10 +94,13 @@ export const cachedLibrary = async () => (await kvGet('library')) || [];
 export async function scanLibrary(folders) {
   const prev = await cachedLibrary();
   const books = [];
+  const caseFiles = [];
   const errors = [];
   for (const root of folders) {
     try {
-      books.push(...(await scanRoot(root)));
+      const r = await scanRoot(root);
+      books.push(...r.books);
+      caseFiles.push(...r.caseFiles);
     } catch (e) {
       errors.push({ root, error: e });
       books.push(...prev.filter((b) => b.root === root));
@@ -102,6 +109,7 @@ export async function scanLibrary(folders) {
   await fillPoints(books, prev);
   books.sort((a, b) => a.title.localeCompare(b.title, 'ja', { numeric: true }));
   await kvSet('library', books);
+  if (!errors.length) await refreshCases(caseFiles); // 読めないフォルダがあるときは、前回の実例を残す
   return { books, errors };
 }
 

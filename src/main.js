@@ -9,18 +9,20 @@ import {
 import { cachedLibrary, scanLibrary, listSubfolders, trackLabel } from './library.js';
 import { setSyncContext, syncNow } from './sync.js';
 import { getMemo, saveMemo, allMemos, fmtTime } from './memo.js';
+import { loadCases, decadeOf } from './cases.js';
 import {
   initPlayer, playerState, onPlayer, loadAudio, toggle, skip, seek, setSpeed, selectTrack, tracksOf, savedPosition, SPEEDS, setArtwork, probeDurations,
 } from './player.js';
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.06';
+const VERSION = 'v1.07';
 const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
   ['shelf', '本棚'],
   ['memo', 'メモ'],
+  ['cases', '不動産実例'], // 実例一覧.csv があるときだけ出す
 ];
 // 本棚の段（上から）
 const RACK_ROWS = [
@@ -40,6 +42,8 @@ const ui = {
   progress: {}, // ダウンロード中：key → { done, total }
   reader: null, // { book, view, el, pdf, pdfLoading }
   category: '', // 本棚の絞り込み（'' = すべて、NO_CATEGORY = 未分類）
+  cases: { header: [], rows: [] }, // 不動産実例
+  caseFilter: { book: '', decade: '' },
   pickerPath: '',
   sheetBookKey: null,
 };
@@ -184,9 +188,10 @@ function booksForTab(tab) {
 }
 
 function renderTabs() {
-  $('#tabs').innerHTML = TABS.map(
-    ([id, label]) => `<button class="tab ${ui.tab === id ? 'on' : ''}" data-act="tab" data-tab="${id}">${label}</button>`,
-  ).join('');
+  if (ui.tab === 'cases' && !ui.cases.rows.length) ui.tab = 'shelf';
+  $('#tabs').innerHTML = TABS.filter(([id]) => id !== 'cases' || ui.cases.rows.length)
+    .map(([id, label]) => `<button class="tab ${ui.tab === id ? 'on' : ''}" data-act="tab" data-tab="${id}">${label}</button>`)
+    .join('');
 }
 
 // 本は表紙を正面に向けて立てかける（面陳）。段で状態がわかるので、状態バッジは ★ と ↻ の段でだけ出す
@@ -256,6 +261,101 @@ function memoCardHtml(book, text) {
     ${book.points.map((p) => `<div class="memo-point">${esc(pointText(p))}</div>`).join('')}
     ${text ? `<div class="memo-text">${esc(text)}</div>` : ''}
   </button>`;
+}
+
+// ---------- 不動産実例（1 物件 1 枚のカードを横にスライド） ----------
+
+// カードの組み立て。ここに挙げていない列も「その他の項目」として下に出すので、CSV に列を足しても消えない
+const CASE_HEAD = ['書名', '事例番号', '誰の物件', '著者の何棟目', 'エリア', '種別'];
+const CASE_STATS = ['物件価格(万円)', '表面利回り(%)', '実質利回り(%)', 'CF(万円/年)', '満室時家賃 年額(万円)', '改修費(万円)'];
+const CASE_GROUPS = [
+  ['融資', ['融資額(万円)', '期間(年)', '金利(%)', '金融機関']],
+  ['売却', ['売却年月', '売却額(万円)']],
+];
+const CASE_NOTE = '特筆事項';
+
+/** 「物件価格(万円)」→ ['物件価格', '万円'] */
+const splitLabel = (h) => {
+  const m = /^(.*?)\(([^)]*)\)$/.exec(h);
+  return m ? [m[1].trim(), m[2]] : [h, ''];
+};
+/** 数字だけの値には 3 桁区切りと単位を付ける（「4000万円弱」のような文はそのまま） */
+function caseValue(h, v) {
+  const unit = splitLabel(h)[1];
+  if (unit && /^-?\d+(\.\d+)?$/.test(v)) return Number(v).toLocaleString('ja-JP') + unit;
+  return v;
+}
+
+function caseCardHtml(row, header, showBook) {
+  const has = (h) => row[h] && row[h].trim();
+  const used = new Set([...CASE_HEAD, ...CASE_STATS, ...CASE_GROUPS.flatMap(([, hs]) => hs), CASE_NOTE]);
+  const dl = (hs) => hs.filter(has).map((h) => `<dt>${esc(splitLabel(h)[0])}</dt><dd>${esc(caseValue(h, row[h]))}</dd>`).join('');
+  const stats = CASE_STATS.filter(has)
+    .map((h) => `<div class="stat"><span>${esc(splitLabel(h)[0])}</span><b>${esc(caseValue(h, row[h]))}</b></div>`)
+    .join('');
+  const who = [has('事例番号') && `事例 ${row['事例番号']}`, row['誰の物件'], row['著者の何棟目']].filter(Boolean).join(' ・ ');
+  const groups = CASE_GROUPS.filter(([, hs]) => hs.some(has))
+    .map(([title, hs]) => `<h4>${title}</h4><dl>${dl(hs)}</dl>`)
+    .join('');
+  const others = header.filter((h) => !used.has(h) && has(h));
+  return `<article class="case-card">
+    ${showBook && has('書名') ? `<p class="case-book">${esc(row['書名'])}</p>` : ''}
+    <h3 class="case-who">${esc(who)}</h3>
+    <p class="case-where">${esc([row['エリア'], row['種別']].filter(Boolean).join(' ・ '))}</p>
+    ${stats ? `<div class="case-stats">${stats}</div>` : ''}
+    ${others.length ? `<dl>${dl(others)}</dl>` : ''}
+    ${groups}
+    ${has(CASE_NOTE) ? `<h4>${CASE_NOTE}</h4><p class="case-note">${esc(row[CASE_NOTE])}</p>` : ''}
+  </article>`;
+}
+
+function caseCarouselHtml(rows, showBook) {
+  if (!rows.length) return '<div class="empty">この条件の実例はありません</div>';
+  return `<div class="case-carousel">
+    <div class="case-nav"><button data-act="case-step" data-d="-1" aria-label="前へ">‹</button><span class="case-count">1 / ${rows.length}</span><button data-act="case-step" data-d="1" aria-label="次へ">›</button></div>
+    <div class="case-track">${rows.map((r) => caseCardHtml(r, ui.cases.header, showBook)).join('')}</div>
+  </div>`;
+}
+
+/** 横スクロールに合わせて「3 / 57」を更新する */
+function bindCarousels(root) {
+  root.querySelectorAll('.case-carousel').forEach((c) => {
+    const track = c.querySelector('.case-track');
+    const count = c.querySelector('.case-count');
+    const n = track.children.length;
+    track.addEventListener(
+      'scroll',
+      () => (count.textContent = `${Math.min(n, Math.round(track.scrollLeft / track.clientWidth) + 1)} / ${n}`),
+      { passive: true },
+    );
+  });
+}
+
+const DECADE_ORDER = (d) => (d === '不明' ? -1 : parseInt(d, 10));
+const bookCases = (book) => ui.cases.rows.filter((r) => r['書名'] === book.title);
+
+function renderCasesTab() {
+  const { rows } = ui.cases;
+  const f = ui.caseFilter;
+  const books = [...new Set(rows.map((r) => r['書名']).filter(Boolean))];
+  if (f.book && !books.includes(f.book)) f.book = '';
+  const byBook = f.book ? rows.filter((r) => r['書名'] === f.book) : rows;
+  const decades = [...new Set(byBook.map(decadeOf))].sort((a, b) => DECADE_ORDER(b) - DECADE_ORDER(a));
+  if (f.decade && !decades.includes(f.decade)) f.decade = '';
+  const list = f.decade ? byBook.filter((r) => decadeOf(r) === f.decade) : byBook;
+  const count = (pred) => rows.filter(pred).length;
+  $('#view').innerHTML = `<div class="cases">
+    <div class="case-filters">
+      <select data-act="case-book"><option value="">すべての本（${rows.length}件）</option>${books
+        .map((b) => `<option value="${esc(b)}" ${f.book === b ? 'selected' : ''}>${esc(b)}（${count((r) => r['書名'] === b)}件）</option>`)
+        .join('')}</select>
+      <select data-act="case-decade"><option value="">すべての年代</option>${decades
+        .map((d) => `<option value="${d}" ${f.decade === d ? 'selected' : ''}>${d}（${byBook.filter((r) => decadeOf(r) === d).length}件）</option>`)
+        .join('')}</select>
+    </div>
+    ${caseCarouselHtml(list, !f.book)}
+  </div>`;
+  bindCarousels($('#view'));
 }
 
 // ---------- 本の詳細シート ----------
@@ -392,7 +492,12 @@ async function openReader(book, { view, page } = {}) {
 }
 
 function readerHtml(book) {
-  const views = [book.mindmap && ['mindmap', 'マインドマップ'], ['memo', 'メモ'], book.pdf && ['pdf', 'PDF']].filter(Boolean);
+  const views = [
+    book.mindmap && ['mindmap', 'マインドマップ'],
+    ['memo', 'メモ'],
+    bookCases(book).length && ['cases', '実例'],
+    book.pdf && ['pdf', 'PDF'],
+  ].filter(Boolean);
   return `
     <header class="reader-top">
       <button class="icon" data-act="close-reader" aria-label="戻る">←</button>
@@ -409,6 +514,7 @@ function readerHtml(book) {
           <div class="memo-bar"><span class="memo-state">保存済み</span><button class="btn primary memo-save" data-act="memo-save" disabled>保存</button></div>
         </div>
       </div>
+      <div class="pane case-pane" data-pane="cases"></div>
       <div class="pane" data-pane="pdf"><div class="pdf-host"></div>
         <div class="pdf-tools"><button data-act="zoom" data-d="-0.5">－</button><button class="page-ind" data-act="goto-page">- / -</button><button data-act="zoom" data-d="0.5">＋</button></div>
       </div>
@@ -456,8 +562,15 @@ async function switchView(v) {
   const { book, el } = r;
   if (v === 'mindmap' && !book.mindmap) v = book.pdf ? 'pdf' : 'memo';
   if (v === 'pdf' && !book.pdf) v = book.mindmap ? 'mindmap' : 'memo';
+  if (v === 'cases' && !bookCases(book).length) v = 'memo';
   r.view = v;
   if (v === 'memo' && !r.memoLoaded) loadMemoPane(r);
+  if (v === 'cases' && !r.casesShown) {
+    r.casesShown = true;
+    const pane = el.querySelector('[data-pane="cases"]');
+    pane.innerHTML = caseCarouselHtml(bookCases(book), false);
+    bindCarousels(pane);
+  }
   if (st(book).view !== v) updateBook(book.key, { view: v });
   el.querySelectorAll('[data-act="view"]').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
   el.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === v));
@@ -703,6 +816,7 @@ function renderView() {
   if (s === 'library') {
     renderTabs();
     if (ui.tab === 'memo') renderMemoList();
+    else if (ui.tab === 'cases') renderCasesTab();
     else renderLibrary();
   } else if (s === 'settings') renderSettings();
   else if (s === 'picker') renderPicker();
@@ -719,8 +833,9 @@ function renderView() {
 function refresh() {
   if (ui.screen === 'library') {
     renderTabs();
-    if (ui.tab !== 'memo') renderLibrary();
-    else renderMemoList();
+    if (ui.tab === 'shelf') renderLibrary();
+    else if (ui.tab === 'memo') renderMemoList();
+    // 実例タブは書き直さない（めくっている位置が戻ってしまうため）
   }
   if (ui.sheetBookKey) {
     const b = findBook(ui.sheetBookKey);
@@ -808,6 +923,10 @@ const actions = {
   'mini-play': () => toggle(),
   'mini-skip': (el) => skip(+el.dataset.d),
   'memo-save': () => saveMemoPane(),
+  'case-step': (el) => {
+    const track = el.closest('.case-carousel').querySelector('.case-track');
+    track.scrollBy({ left: +el.dataset.d * track.clientWidth, behavior: 'smooth' });
+  },
   'memo-open': (el) => {
     const b = findBook(el.dataset.key);
     if (b) openReader(b, { view: 'memo' });
@@ -887,6 +1006,11 @@ document.addEventListener('change', (ev) => {
     if (ps.book?.key === r.book.key && ps.kind === r.kind) selectTrack(+el.value);
     else loadAudioSafely(r.book, r.kind, { i: +el.value, t: 0 });
   }
+  if (el.dataset.act === 'case-book' || el.dataset.act === 'case-decade') {
+    ui.caseFilter[el.dataset.act === 'case-book' ? 'book' : 'decade'] = el.value;
+    kvSet('case-filter', ui.caseFilter);
+    renderCasesTab();
+  }
   if (el.dataset.act === 'set-category') {
     let cat = el.value;
     if (cat === '__new') {
@@ -913,6 +1037,7 @@ function applyBooks(books) {
 async function reloadLibrary() {
   const { books, errors } = await scanLibrary(ui.folders);
   applyBooks(books);
+  ui.cases = await loadCases();
   if (errors.length) toast('読み込めないフォルダがありました：' + errors.map((e) => e.root).join(', '));
   try {
     await syncNow();
@@ -963,6 +1088,8 @@ async function boot() {
   if (!(await isLoggedIn())) return go('login');
   ui.folders = (await kvGet('folders')) || [];
   ui.category = (await kvGet('category-filter')) || '';
+  ui.cases = await loadCases();
+  ui.caseFilter = (await kvGet('case-filter')) || { book: '', decade: '' };
   if (!ui.folders.length) {
     ui.pickerPath = '';
     return go('picker');
