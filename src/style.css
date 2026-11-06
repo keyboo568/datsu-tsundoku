@@ -276,6 +276,8 @@ body.mock .mock-tag { display: inline-block; }
 .settings h3 { margin: 0 0 6px; font-size: 15px; }
 .settings p { margin: 4px 0; font-size: 13px; }
 .row-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); word-break: break-all; }
+.dl-log { max-height: 320px; overflow-y: auto; font-size: 13px; }
+.dl-log > div { padding: 6px 0; border-bottom: 1px solid var(--line); word-break: break-all; }
 .crumbs { margin: 8px 0; word-break: break-all; }
 .folder-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 90px; }
 .folder { text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 12px; }

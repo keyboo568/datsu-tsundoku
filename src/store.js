@@ -89,10 +89,15 @@ export async function downloads() {
   return (await kvGet('downloads')) || {};
 }
 
+/** まだ端末にないファイル */
+export async function missingFiles(book, files = coreFiles(book)) {
+  const prev = (await downloads())[book.key];
+  return files.filter((f) => prev?.files[f.path]?.rev !== f.rev);
+}
+
 /** まだ端末にない分のバイト数（ダウンロード前の確認用） */
 export async function remainingBytes(book, files = coreFiles(book)) {
-  const prev = (await downloads())[book.key];
-  return files.filter((f) => prev?.files[f.path]?.rev !== f.rev).reduce((s, f) => s + (f.size || 0), 0);
+  return (await missingFiles(book, files)).reduce((s, f) => s + (f.size || 0), 0);
 }
 
 export class DownloadStopped extends Error {}
@@ -138,9 +143,36 @@ export async function downloadBook(book, onProgress, shouldStop = () => false, f
     }
     await writable.close();
     await patchDownload(book.key, (m) => ({ ...m, downloadedAt: Date.now(), files: { ...m.files, [f.path]: { name, rev: f.rev } } }));
+    dlog(`保存：${f.name}`);
   }
-  if (isCore) await patchDownload(book.key, (m) => ({ ...m, complete: true }));
+  if (isCore) await markComplete(book.key);
 }
+
+export const markComplete = (key) => patchDownload(key, (m) => ({ ...m, complete: true }));
+
+/** よそで受け取った中身（裏のダウンロードの受け箱）を端末に保存する */
+export async function storeFile(key, f, res) {
+  const dir = await (await booksDir()).getDirectoryHandle('b' + hash(key), { create: true });
+  const name = 'f_' + hash(f.path);
+  const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
+  await res.body.pipeTo(writable);
+  await patchDownload(key, (m) => ({ ...m, downloadedAt: Date.now(), files: { ...m.files, [f.path]: { name, rev: f.rev } } }));
+}
+
+// ---------- ダウンロードの記録（途中で止まった理由を後から見る用。端末の中だけ・新しい順に 200 件） ----------
+
+const LOG_MAX = 200;
+let logQueue = Promise.resolve();
+
+export function dlog(msg) {
+  const entry = { t: Date.now(), msg, net: navigator.connection?.type || (navigator.onLine ? '' : 'offline'), vis: document.visibilityState };
+  logQueue = logQueue
+    .then(async () => kvSet('dl-log', [entry, ...((await kvGet('dl-log')) || [])].slice(0, LOG_MAX)))
+    .catch(() => {});
+  return logQueue;
+}
+
+export const dlogList = async () => (await kvGet('dl-log')) || [];
 
 /** ダウンロード済みのファイルを File で返す。なければ null */
 export async function localFile(key, path) {

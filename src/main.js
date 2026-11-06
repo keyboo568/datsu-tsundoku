@@ -2,10 +2,11 @@ import './style.css';
 import { registerSW } from 'virtual:pwa-register';
 import { isMock, hasAppKey, isLoggedIn, startLogin, handleRedirect, logout, dbx, downloadText } from './dropbox.js';
 import {
-  kvGet, kvSet, loadState, bookState, updateBook, seedBook, allStates, flushState,
+  kvGet, kvSet, kvDel, loadState, bookState, updateBook, seedBook, allStates, flushState,
   getThumb, setThumb, downloads, downloadBook, localFile, removeDownload, touchDownload, purgeOldDownloads, daysLeft,
-  remainingBytes, DownloadStopped,
+  missingFiles, markComplete, DownloadStopped, dlog, dlogList,
 } from './store.js';
+import { startBg, runningBg, collectBg, onBgDone, abortBgOnCellular } from './bgfetch.js';
 import { cachedLibrary, scanLibrary, listSubfolders, trackLabel } from './library.js';
 import { setSyncContext, syncNow } from './sync.js';
 import { getMemo, saveMemo, allMemos, fmtTime } from './memo.js';
@@ -16,7 +17,7 @@ import {
 import { openPdf, closePdf, renderCover, PdfViewer } from './pdf.js';
 import { showMindmap } from './mindmap.js';
 
-const VERSION = 'v1.07';
+const VERSION = 'v1.08';
 const NO_CATEGORY = '__none';
 const STATUS = { unread: '未読', reading: '読書中', done: '既読' };
 const TABS = [
@@ -415,50 +416,137 @@ function askNetwork(bytes, what = '') {
   return confirm(`モバイル通信で${what}${mb(bytes)}ダウンロードします。いいですか？`) ? { cellularOk: true } : null;
 }
 
+// ダウンロード中は画面を消さない（この画面で落としているとき、画面が消えると Android が止めることがあるため）
+let awake = 0;
+let wakeLock = null;
+async function syncWakeLock() {
+  if (awake > 0 && !wakeLock && document.visibilityState === 'visible' && navigator.wakeLock) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => (wakeLock = null));
+    } catch {}
+  } else if (awake <= 0 && wakeLock) {
+    wakeLock.release();
+    wakeLock = null;
+  }
+}
+function keepAwake(on) {
+  awake = Math.max(0, awake + (on ? 1 : -1));
+  syncWakeLock();
+}
+
+let lastProgress = 0;
+function showProgress(key, done, total) {
+  ui.progress[key] = { done, total: total || 1 };
+  if (Date.now() - lastProgress < 400) return;
+  lastProgress = Date.now();
+  refresh();
+  if (ui.reader?.book.key === key) toast(`ダウンロード中… ${Math.floor((done / (total || 1)) * 100)}%`);
+}
+
 // 本をタップしたら、未ダウンロードの分（PDF 以外）を自動でダウンロードする。
-// confirmText を渡すと、モバイル通信のときの確認文をそれに差し替える。ダウンロードが済んでいれば true
-async function autoDownload(book, confirmText) {
+// 使えれば Android の裏のダウンロードに任せる（アプリを切り替えても閉じても続く）。使えなければこの画面で落とす。
+// confirmText：モバイル通信のときの確認文を差し替える。cellularOk：もうモバイル通信の許可をもらっている。
+// 戻り値：この場でダウンロードが済んだら true（裏に任せたときは false。済んだら onBgDone で知らせる）
+async function autoDownload(book, { confirmText, cellularOk = false } = {}) {
   if (isDownloaded(book.key)) return true;
   if (ui.progress[book.key] || !navigator.onLine) return false;
-  const bytes = await remainingBytes(book);
-  if (!bytes) return true;
-  let cellularOk = false;
-  if (onCellular()) {
-    if (!confirm(confirmText ? confirmText(bytes) : `モバイル通信で${mb(bytes)}ダウンロードします。いいですか？`)) return false;
+  const files = await missingFiles(book);
+  if (!files.length) {
+    await markComplete(book.key);
+    ui.downloads = await downloads();
+    return true;
+  }
+  const bytes = files.reduce((s, f) => s + (f.size || 0), 0);
+  if (onCellular() && !cellularOk) {
+    if (!confirm(confirmText ? confirmText(bytes) : `モバイル通信で${mb(bytes)}ダウンロードします。いいですか？`)) {
+      kvDel('dl-active'); // 断られたら、途中で止まった分を勝手に再開しない
+      return false;
+    }
     cellularOk = true;
   }
-  ui.progress[book.key] = { done: 0, total: 1 };
-  let last = 0;
+  ui.progress[book.key] = { done: 0, total: bytes };
+  refresh();
+  try {
+    const bg = await startBg(book, files, { core: true, cellularOk, onProgress: (d, t) => showProgress(book.key, d, t) });
+    if (bg) {
+      dlog(`開始（裏で）：「${book.title}」${files.length} 本 ${mb(bytes)}`);
+      kvDel('dl-active');
+      toast('ダウンロードを始めました。アプリを切り替えても続きます');
+      return false;
+    }
+  } catch (e) {
+    dlog(`裏のダウンロードを使えなかった：${e.message}`);
+  }
+  return downloadHere(book, cellularOk, files.length, bytes);
+}
+
+/** この画面でダウンロードする。止まったら、次に開いたとき（前に戻ったとき）続きから再開する */
+async function downloadHere(book, cellularOk, count, bytes) {
+  dlog(`開始（画面で）：「${book.title}」${count} 本 ${mb(bytes)}`);
+  await kvSet('dl-active', { key: book.key, cellularOk });
+  keepAwake(true);
   let ok = false;
   try {
     await downloadBook(
       book,
-      (done, total) => {
-        ui.progress[book.key] = { done, total: total || 1 };
-        if (Date.now() - last > 400) {
-          last = Date.now();
-          refresh();
-          if (ui.reader?.book.key === book.key) toast(`ダウンロード中… ${Math.floor((done / (total || 1)) * 100)}%`);
-        }
-      },
+      (done, total) => showProgress(book.key, done, total),
       () => !cellularOk && onCellular(), // Wi-Fi が切れてモバイル通信になったら止める
     );
     ok = true;
+    dlog(`完了：「${book.title}」`);
     toast(`「${book.title}」をダウンロードしました`);
+    await kvDel('dl-active');
   } catch (e) {
-    if (e instanceof DownloadStopped) toast('Wi-Fi が切れたので止めました。続きは Wi-Fi につないでから');
-    else toast('ダウンロードに失敗しました：' + e.message);
+    if (e instanceof DownloadStopped) {
+      dlog(`Wi-Fi が切れたので止めた：「${book.title}」`);
+      toast('Wi-Fi が切れたので止めました。続きは Wi-Fi につないでから');
+      await kvDel('dl-active');
+    } else {
+      dlog(`失敗：「${book.title}」${e.message}`);
+      toast('ダウンロードに失敗しました：' + e.message);
+    }
   }
+  keepAwake(false);
   delete ui.progress[book.key];
   ui.downloads = await downloads();
   refresh();
   return ok;
 }
 
+/** 前回この画面で落としていて止まった本（アプリが閉じられた・通信が切れた）を、続きから落とす */
+async function resumeInterrupted() {
+  const a = await kvGet('dl-active');
+  if (!a || ui.progress[a.key] || !navigator.onLine) return;
+  const book = findBook(a.key);
+  if (!book || isDownloaded(a.key)) return kvDel('dl-active');
+  dlog(`続きから再開：「${book.title}」`);
+  autoDownload(book, {
+    cellularOk: a.cellularOk,
+    confirmText: (bytes) => `「${book.title}」のダウンロードが途中で止まっています。続き（${mb(bytes)}）をモバイル通信でダウンロードしますか？`,
+  });
+}
+
+// 裏のダウンロードが終わったら（アプリを閉じている間に終わった分は、次に開いたときに）知らせる
+const pdfWaiters = new Map(); // 裏で落としている PDF の id → 済んだら呼ぶ関数
+onBgDone(async ({ id, key, ok, job }) => {
+  if (job.core) delete ui.progress[key];
+  ui.downloads = await downloads();
+  refresh();
+  const waiter = pdfWaiters.get(id);
+  if (waiter) {
+    pdfWaiters.delete(id);
+    return waiter(ok);
+  }
+  toast(ok ? `「${job.title}」${job.core ? '' : 'の PDF '}をダウンロードしました` : `「${job.title}」のダウンロードが途中で止まりました。本をタップすると続きから`);
+});
+
 /** 音声を読み込む。モバイル通信で未ダウンロードなら、流さずにその場でダウンロードするか聞く */
 async function loadAudioSafely(book, kind, opts) {
   if (!isDownloaded(book.key) && onCellular()) {
-    const done = await autoDownload(book, (bytes) => `まだダウンロードしていません。モバイル通信で${mb(bytes)}ダウンロードしますか？`);
+    const p = ui.progress[book.key];
+    if (p) return toast(`ダウンロード中です（${Math.floor((p.done / p.total) * 100)}%）。終わると再生できます`);
+    const done = await autoDownload(book, { confirmText: (bytes) => `まだダウンロードしていません。モバイル通信で${mb(bytes)}ダウンロードしますか？` });
     if (!done) return;
   }
   try {
@@ -629,18 +717,34 @@ async function downloadPdf(r, host) {
     return null;
   }
   host.innerHTML = `<div class="loading">PDF をダウンロード中… <b class="pdf-dl">0%</b><span class="bar big"><i></i></span></div>`;
+  const onProgress = (done, total) => {
+    const pct = ((done / (total || 1)) * 100).toFixed(0) + '%';
+    const b = host.querySelector('.pdf-dl');
+    if (!b) return;
+    b.textContent = pct;
+    host.querySelector('.bar i').style.width = pct;
+  };
+  const size = mb(book.pdf.size || 0);
   try {
-    await downloadBook(
-      book,
-      (done, total) => {
-        const pct = ((done / (total || 1)) * 100).toFixed(0) + '%';
-        host.querySelector('.pdf-dl').textContent = pct;
-        host.querySelector('.bar i').style.width = pct;
-      },
-      () => !ok.cellularOk && onCellular(),
-      [book.pdf],
-    );
+    const bg = await startBg(book, [book.pdf], { core: false, cellularOk: ok.cellularOk, onProgress }).catch((e) => {
+      dlog(`裏のダウンロードを使えなかった：${e.message}`);
+      return null;
+    });
+    if (bg) {
+      dlog(`開始（裏で）：「${book.title}」PDF ${size}`);
+      if (!(await new Promise((resolve) => pdfWaiters.set(bg.id, resolve)))) throw new Error('途中で止まりました');
+    } else {
+      dlog(`開始（画面で）：「${book.title}」PDF ${size}`);
+      keepAwake(true);
+      try {
+        await downloadBook(book, onProgress, () => !ok.cellularOk && onCellular(), [book.pdf]);
+      } finally {
+        keepAwake(false);
+      }
+      dlog(`完了：「${book.title}」PDF`);
+    }
   } catch (e) {
+    dlog(`${e instanceof DownloadStopped ? 'Wi-Fi が切れたので止めた' : '失敗：' + e.message}：「${book.title}」PDF`);
     host.innerHTML = `<div class="empty">${e instanceof DownloadStopped ? 'Wi-Fi が切れたので PDF のダウンロードを止めました' : 'PDF をダウンロードできませんでした：' + esc(e.message)}<br><small>${again}</small></div>`;
     return null;
   }
@@ -765,6 +869,9 @@ onPlayer((ev) => {
 async function renderSettings() {
   const est = navigator.storage?.estimate ? await navigator.storage.estimate() : null;
   const dls = Object.entries(ui.downloads);
+  const log = (await dlogList()).slice(0, 50);
+  const when = (t) => new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const where = (e) => [{ wifi: 'Wi-Fi', ethernet: '有線', cellular: 'モバイル', offline: 'オフライン' }[e.net] || e.net, e.vis === 'hidden' && '裏'].filter(Boolean).join('・');
   $('#view').innerHTML = `<div class="settings">
     <section><h3>登録フォルダ</h3>
       ${ui.folders.map((f) => `<div class="row-item"><span>${esc(f || '（Dropbox 全体）')}</span><button class="link danger" data-act="remove-folder" data-path="${esc(f)}">外す</button></div>`).join('') || '<p class="muted">まだありません</p>'}
@@ -773,6 +880,10 @@ async function renderSettings() {
     <section><h3>ダウンロード済み（${dls.length}冊）</h3>
       <p class="muted">最後に開いてから 2 週間で端末から自動で消えます（Dropbox 側は消えません）。${est ? `端末で使用中 ${mb(est.usage || 0)}` : ''}</p>
       ${dls.map(([k, d]) => `<div class="row-item"><span>${esc(findBook(k)?.title || k)}<small class="muted"> ・ ${d.complete === false ? '途中まで' : `あと${daysLeft(d)}日`}</small></span><button class="link danger" data-act="remove-dl" data-key="${esc(k)}">削除</button></div>`).join('')}
+    </section>
+    <section><h3>ダウンロードの記録</h3>
+      <p class="muted">途中で止まったときに、理由を調べるためのものです（新しい順・この端末の中だけ）。</p>
+      <div class="dl-log">${log.map((e) => `<div><small class="muted">${when(e.t)}${where(e) ? ` [${where(e)}]` : ''}</small><br>${esc(e.msg)}</div>`).join('') || '<p class="muted">まだありません</p>'}</div>
     </section>
     <section><h3>カテゴリ</h3>
       <p class="muted">本の詳細でカテゴリを付けると、ここに出ます。</p>
@@ -1023,7 +1134,19 @@ document.addEventListener('change', (ev) => {
 });
 addEventListener('online', () => refresh());
 addEventListener('offline', () => refresh());
-document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && flushState());
+document.addEventListener('visibilitychange', () => {
+  const visible = document.visibilityState === 'visible';
+  if (Object.keys(ui.progress).length) dlog(visible ? 'アプリが前に戻った' : 'アプリが裏に回った');
+  if (!visible) return flushState();
+  syncWakeLock();
+  if (onCellular()) abortBgOnCellular();
+  collectBg().then(resumeInterrupted);
+});
+navigator.connection?.addEventListener('change', () => {
+  if (Object.keys(ui.progress).length) dlog(`通信が変わった：${navigator.connection.type || '不明'}`);
+  if (onCellular()) abortBgOnCellular();
+});
+navigator.serviceWorker?.addEventListener('message', (e) => e.data?.type === 'bgfetch-done' && collectBg());
 addEventListener('beforeunload', (e) => memoDirty() && e.preventDefault());
 
 // ---------- 読み込み・起動 ----------
@@ -1096,11 +1219,17 @@ async function boot() {
   }
   const purged = await purgeOldDownloads();
   if (purged) toast(`2 週間開いていない ${purged} 冊を端末から削除しました`);
+  if (await kvGet('dl-active')) dlog('前回、画面でのダウンロード中にアプリが閉じられた（または止まった）');
+  await collectBg().catch((e) => dlog(`受け箱を読めなかった：${e.message}`));
   ui.downloads = await downloads();
+  for (const [key, p] of Object.entries(await runningBg((k, d, t) => showProgress(k, d, t)).catch(() => ({})))) {
+    ui.progress[key] = { done: p.done, total: p.total || 1 };
+  }
   applyBooks(await cachedLibrary());
   go('library');
   loadThumbs();
   askResume();
+  resumeInterrupted();
   if (navigator.onLine) reloadLibrary().catch((e) => toast('読み込めませんでした：' + e.message));
 }
 
