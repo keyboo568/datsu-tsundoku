@@ -100,7 +100,6 @@ export default defineConfig(({ mode }) => {
         workbox: {
           globPatterns: ['**/*.{js,mjs,css,html,png,svg}'],
           maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
-          importScripts: ['bgfetch-sw.js'], // バックグラウンドダウンロードの受け口
           navigateFallbackDenylist: [/^\/__mock\//],
         },
       }),

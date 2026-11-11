@@ -150,15 +150,6 @@ export async function downloadBook(book, onProgress, shouldStop = () => false, f
 
 export const markComplete = (key) => patchDownload(key, (m) => ({ ...m, complete: true }));
 
-/** よそで受け取った中身（裏のダウンロードの受け箱）を端末に保存する */
-export async function storeFile(key, f, res) {
-  const dir = await (await booksDir()).getDirectoryHandle('b' + hash(key), { create: true });
-  const name = 'f_' + hash(f.path);
-  const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
-  await res.body.pipeTo(writable);
-  await patchDownload(key, (m) => ({ ...m, downloadedAt: Date.now(), files: { ...m.files, [f.path]: { name, rev: f.rev } } }));
-}
-
 // ---------- ダウンロードの記録（途中で止まった理由を後から見る用。端末の中だけ・新しい順に 200 件） ----------
 
 const LOG_MAX = 200;
